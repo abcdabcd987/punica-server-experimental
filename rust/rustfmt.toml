@@ -1,0 +1,9 @@
+max_width = 80
+use_small_heuristics = "Max"
+newline_style = "Unix"
+use_field_init_shorthand = true
+
+unstable_features = true
+wrap_comments = true
+group_imports = "StdExternalCrate"
+version = "Two"
