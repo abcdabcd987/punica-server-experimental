@@ -1,0 +1,25 @@
+Runner migration plan:
+1. New Runner -> Scheduler: AddRunnerRequest
+2. Parallel for each GPU:
+  1. Scheduler -> Old Runner: ReleaseGpuRequest
+  2. Old Runner wait until the old GPU clears up
+  3. Old Runner -> Scheduler: ReleaseGpuResponse
+  4. Scheduler -> New Runner: AcquireGpuRequest
+  5. New Runner -> Scheduler: AcquireGpuResponse
+3. Wait for all GPUs in the old runner to be released
+4. Terminate old runner
+
+
+Scheduler migration plan:
+1. New Scheduler -> Old Scheduler: SchedulerTakeOverRequest
+2. Parallel for each ApiServer:
+  1. Old Scheduler -> ApiServer: MigrateToNewSchedulerRequest
+  2. ApiServer -> New Scheduler: AddApiServerRequest
+  3. ApiServer -> Old Scheduler: ApiServerMigratedToNewScheduler
+3. Parallel for each Runner:
+  1. Old Scheduler -> Runner: MigrateToNewSchedulerRequest
+  2. Runner -> New Scheduler: AddRunnerRequest
+  3. Runner -> Old Scheduler: RunnerMigratedToNewScheduler
+  4. TextGenChunk are sent to the new scheduler
+4. Wait for all ApiServers and Runners to be migrated
+5. Terminate old scheduler

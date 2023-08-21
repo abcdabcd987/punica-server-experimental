@@ -1,1 +1,7 @@
+.vscode/
 target/
+build/
+__pycache__/
+*.egg-info/
+*.py[cod]
+*.so
