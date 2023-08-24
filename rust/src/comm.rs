@@ -45,11 +45,15 @@ pub struct TextGenChunk {
     pub choices: Vec<ChoiceChunk>,
 }
 
+#[derive(Serialize, Deserialize, Debug)]
+pub struct CancelTextGen {
+    pub request_id: Uuid,
+}
+
 //====== Runner ======
 
 #[derive(Serialize, Deserialize, Debug)]
 pub enum RunnerToSchedulerMessage {
-    AddRunnerRequest(AddRunnerRequest),
     DelRunnerRequest(DelRunnerRequest),
     AcquireGpuResponse(AcquireGpuResponse),
     ReleaseGpuResponse(ReleaseGpuResponse),
@@ -65,7 +69,9 @@ pub enum SchedulerToRunnerMessage {
     RunnerExitCommand(RunnerExitCommand),
     AcquireGpuCommand(AcquireGpuCommand),
     ReleaseGpuCommand(ReleaseGpuCommand),
+
     TextGenRequest(TextGenRequest),
+    CancelTextGen(CancelTextGen),
 }
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -125,11 +131,11 @@ pub struct RunnerMigratedToNewScheduler {}
 
 #[derive(Serialize, Deserialize, Debug)]
 pub enum ApiServerToSchedulerMessage {
-    AddApiServerRequest(AddApiServerRequest),
     DelApiServerRequest(DelApiServerRequest),
     ApiServerMigratedToNewScheduler(ApiServerMigratedToNewScheduler),
 
     TextGenRequest(TextGenRequest),
+    CancelTextGen(CancelTextGen),
 }
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -168,3 +174,13 @@ pub struct SchedulerTakeOverRequest {}
 
 #[derive(Serialize, Deserialize, Debug)]
 pub struct SchedulerTakeOverResponse {}
+
+//====== Handshake ======
+
+#[allow(clippy::enum_variant_names)]
+#[derive(Serialize, Deserialize, Debug)]
+pub enum HelloScheduler {
+    AddRunnerRequest(AddRunnerRequest),
+    AddApiServerRequest(AddApiServerRequest),
+    SchedulerTakeOverRequest(SchedulerTakeOverRequest),
+}
