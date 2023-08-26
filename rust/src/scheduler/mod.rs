@@ -1,5 +1,6 @@
+use std::collections::{HashMap, HashSet};
 use std::net::SocketAddr;
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, Mutex, RwLock};
 use std::time::Duration;
 
 use axum::extract::ws::{Message, WebSocket};
@@ -15,6 +16,7 @@ use tokio_util::sync::CancellationToken;
 use tower::ServiceBuilder;
 use tower_http::trace::{DefaultMakeSpan, TraceLayer};
 use tower_http::ServiceBuilderExt;
+use uuid::Uuid;
 
 use crate::comm;
 
@@ -46,6 +48,7 @@ pub async fn scheduler_main(args: SchedulerArgs) -> anyhow::Result<()> {
 struct Env {
     ct: CancellationToken,
     http_handle: axum_server::Handle,
+    scheduler: Arc<Scheduler>,
 }
 
 impl Env {
@@ -53,6 +56,7 @@ impl Env {
         Arc::new(Env {
             ct: CancellationToken::new(),
             http_handle: axum_server::Handle::new(),
+            scheduler: Scheduler::new(),
         })
     }
 }
@@ -114,17 +118,17 @@ async fn ws_handler(
 async fn handle_socket(env: Arc<Env>, ws: WebSocket, addr: SocketAddr) {
     let conn = Connection::new(addr, env.ct.child_token());
 
-    serve_conn(conn, ws).await;
+    serve_conn(env, conn, ws).await;
 }
 
-async fn serve_conn(conn: Arc<Connection>, ws: WebSocket) {
+async fn serve_conn(env: Arc<Env>, conn: Arc<Connection>, ws: WebSocket) {
     let (ws_tx, ws_rx) = ws.split();
     let (ch_tx, ch_rx) = tokio::sync::mpsc::channel::<Message>(32);
 
     let mut tasks = JoinSet::new();
     tasks.spawn(conn_ping(conn.clone(), ch_tx.clone()));
     tasks.spawn(conn_write(conn.clone(), ws_tx, ch_rx));
-    tasks.spawn(conn_read(conn.clone(), ws_rx, ch_tx));
+    tasks.spawn(conn_read(env, conn.clone(), ws_rx, ch_tx));
     while let Some(res) = tasks.join_next().await {
         if let Err(e) = res {
             error!(
@@ -175,6 +179,7 @@ async fn conn_write(
 }
 
 async fn conn_read(
+    env: Arc<Env>,
     conn: Arc<Connection>,
     mut ws_rx: SplitStream<WebSocket>,
     ch_tx: Sender<Message>,
@@ -187,19 +192,25 @@ async fn conn_read(
                     Some(Ok(Message::Ping(_))) => {
                         conn_update_liveness(conn.clone());
                         let tx = ch_tx.clone();
-                        tasks.spawn(async move{let _ =tx.send(Message::Pong(vec![])).await;});
+                        tasks.spawn(async move {
+                            let _ =tx.send(Message::Pong(vec![])).await;
+                        });
                     },
                     Some(Ok(Message::Pong(_))) => {
                         conn_update_liveness(conn.clone());
                     },
                     Some(Ok(Message::Binary(v))) => {
                         tasks.spawn({
+                            let env = env.clone();
                             let conn = conn.clone();
                             let ch_tx = ch_tx.clone();
-                            async move {if let Err(e) = conn_handle_binary_message(conn.clone(), v, ch_tx.clone()).await {
-                            error!("Failed to parse message from {}, closing connection. Error: {}", conn.addr, e);
-                            conn.ct.cancel();
-                        }}});
+                            async move {
+                                if let Err(e) = conn_handle_binary_message(env, conn.clone(), v, ch_tx).await {
+                                    error!("Failed to parse message from {}, closing connection. Error: {}", conn.addr, e);
+                                    conn.ct.cancel();
+                                }
+                            }
+                        });
                     },
                     Some(Ok(Message::Text(_))) => {
                         error!("Unexpected text from {}, closing connection.", conn.addr);
@@ -238,6 +249,7 @@ fn conn_update_liveness(_conn: Arc<Connection>) {
 }
 
 async fn conn_handle_binary_message(
+    env: Arc<Env>,
     conn: Arc<Connection>,
     binary: Vec<u8>,
     tx: Sender<Message>,
@@ -254,8 +266,13 @@ async fn conn_handle_binary_message(
             };
         }
         NodeType::Runner => {
-            conn_handle_runner_message(conn, postcard::from_bytes(&binary)?, tx)
-                .await
+            conn_handle_runner_message(
+                env,
+                conn,
+                postcard::from_bytes(&binary)?,
+                tx,
+            )
+            .await
         }
         NodeType::ApiServer => {
             conn_handle_apisrv_message(conn, postcard::from_bytes(&binary)?, tx)
@@ -274,15 +291,18 @@ async fn conn_handle_binary_message(
 }
 
 async fn conn_handle_runner_message(
-    _conn: Arc<Connection>,
+    env: Arc<Env>,
+    conn: Arc<Connection>,
     msg: comm::RunnerToSchedulerMessage,
-    _tx: Sender<Message>,
+    tx: Sender<Message>,
 ) {
     use comm::RunnerToSchedulerMessage as M;
     match msg {
-        M::AddRunnerRequest(_) => todo!(),
+        M::AddRunnerRequest(m) => {
+            env.scheduler.add_runner(conn.addr, tx, m).await
+        }
         M::DelRunnerRequest(_) => todo!(),
-        M::AcquireGpuResponse(_) => todo!(),
+        M::AcquireGpuResponse(m) => env.scheduler.acquire_gpu_resp(m),
         M::ReleaseGpuResponse(_) => todo!(),
         M::RunnerMigrateToNewSchedulerCommand(_) => todo!(),
         M::RunnerMigratedToNewScheduler(_) => todo!(),
@@ -305,4 +325,133 @@ async fn conn_handle_scheduler_message(
     _tx: Sender<Message>,
 ) {
     todo!();
+}
+
+struct Scheduler {
+    gpus: RwLock<HashMap<Uuid, Arc<Gpu>>>,
+    runners: RwLock<HashMap<Uuid, Arc<Runner>>>,
+}
+
+enum GpuState {
+    _Free,
+    Acquiring,
+    Acquired,
+}
+
+struct Gpu {
+    prop: comm::CudaDeviceProp,
+    runner: Uuid,
+    state: Mutex<GpuState>,
+}
+
+struct Runner {
+    id: Uuid,
+    addr: SocketAddr,
+    tx: Sender<Message>,
+    devices: HashSet<Uuid>,
+}
+
+impl Scheduler {
+    pub fn new() -> Arc<Scheduler> {
+        Arc::new(Scheduler {
+            gpus: RwLock::new(HashMap::new()),
+            runners: RwLock::new(HashMap::new()),
+        })
+    }
+
+    pub async fn add_runner(
+        &self,
+        addr: SocketAddr,
+        tx: Sender<Message>,
+        msg: comm::AddRunnerRequest,
+    ) {
+        // Add runner
+        let runner = {
+            let mut runners = self.runners.write().unwrap();
+            if runners.contains_key(&msg.runner_id) {
+                error!("Runner {} already exists. Skip.", msg.runner_id);
+                return;
+            }
+            let runner = Arc::new(Runner {
+                id: msg.runner_id,
+                addr,
+                tx,
+                devices: msg.devices.iter().map(|prop| prop.uuid).collect(),
+            });
+            runners.insert(msg.runner_id, runner.clone());
+            runner
+        };
+        let num_gpus = msg.devices.len();
+        info!(
+            "Add runner {} from {} with {} GPUs",
+            runner.id, runner.addr, num_gpus
+        );
+
+        // Add GPUs
+        {
+            let mut gpus = self.gpus.write().unwrap();
+            for (idx, prop) in msg.devices.into_iter().enumerate() {
+                if gpus.contains_key(&prop.uuid) {
+                    error!("GPU {} already exists. Skip.", prop.uuid);
+                    continue;
+                }
+                info!(
+                    "Add Runner {} GPU {}/{}. UUID: {}, Name: {}, sm_{}{}, Memory: {:.3} GiB",
+                    runner.id,
+                    idx + 1,
+                    num_gpus,
+                    prop.uuid,
+                    prop.name,
+                    prop.total_memory as f32 / 2f32.powi(30),
+                    prop.sm_major,
+                    prop.sm_minor,
+                );
+                gpus.insert(
+                    prop.uuid,
+                    Arc::new(Gpu {
+                        prop,
+                        runner: msg.runner_id,
+                        state: Mutex::new(GpuState::Acquiring),
+                    }),
+                );
+            }
+        }
+
+        // Acquire GPUs
+        for uuid in runner.devices.iter() {
+            runner
+                .tx
+                .send(Message::Binary(
+                    postcard::to_stdvec(&comm::AcquireGpuCommand {
+                        gpu_uuid: *uuid,
+                    })
+                    .unwrap(),
+                ))
+                .await
+                .unwrap();
+        }
+    }
+
+    pub fn acquire_gpu_resp(&self, msg: comm::AcquireGpuResponse) {
+        let gpus = self.gpus.read().unwrap();
+        let gpu = gpus.get(&msg.gpu_uuid).unwrap();
+        let mut state = gpu.state.lock().unwrap();
+        match *state {
+            GpuState::Acquiring => {
+                *state = GpuState::Acquired;
+                info!(
+                    "Acquired GPU {} on Runner {}. Name: {}, sm_{}{}, Memory: {:.3} GiB",
+                    msg.gpu_uuid,
+                    gpu.runner,
+                    gpu.prop.name,
+                    gpu.prop.sm_major,
+                    gpu.prop.sm_minor,
+                    gpu.prop.total_memory as f32 / 2f32.powi(30)
+                );
+            }
+            _ => {
+                error!("GPU {} is not in Acquiring state. Skip.", msg.gpu_uuid);
+            }
+        }
+    }
 }
