@@ -18,7 +18,7 @@ struct Cli {
 #[derive(Debug, clap::Subcommand)]
 enum Commands {
     Scheduler(scheduler::SchedulerArgs),
-    DevHello {},
+    Runner {},
 }
 
 fn main() -> anyhow::Result<()> {
@@ -31,16 +31,16 @@ fn main() -> anyhow::Result<()> {
         .with(tracing_subscriber::fmt::layer())
         .init();
 
-    let rt = tokio::runtime::Builder::new_current_thread()
+    let amain = async {
+        match cli.command {
+            Commands::Scheduler(args) => scheduler::scheduler_main(args).await,
+            Commands::Runner {} => runner::runner_main().await,
+        }
+    };
+
+    tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
-        .unwrap();
-    match cli.command {
-        Commands::Scheduler(args) => {
-            rt.block_on(scheduler::scheduler_main(args))?
-        }
-        Commands::DevHello {} => rt.block_on(async { runner::hello_main() })?,
-    }
-
-    Ok(())
+        .unwrap()
+        .block_on(amain)
 }

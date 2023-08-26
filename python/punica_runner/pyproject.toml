@@ -2,6 +2,7 @@
 name = "punica_runner"
 version = "0.1.0"
 requires-python = ">=3.10"
+dependencies = ["nvidia-ml-py"]
 
 [build-system]
 requires = ["setuptools>=43.0.0", "wheel"]
