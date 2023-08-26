@@ -54,6 +54,7 @@ pub struct CancelTextGen {
 
 #[derive(Serialize, Deserialize, Debug)]
 pub enum RunnerToSchedulerMessage {
+    AddRunnerRequest(AddRunnerRequest),
     DelRunnerRequest(DelRunnerRequest),
     AcquireGpuResponse(AcquireGpuResponse),
     ReleaseGpuResponse(ReleaseGpuResponse),
@@ -131,6 +132,7 @@ pub struct RunnerMigratedToNewScheduler {}
 
 #[derive(Serialize, Deserialize, Debug)]
 pub enum ApiServerToSchedulerMessage {
+    AddApiServerRequest(AddApiServerRequest),
     DelApiServerRequest(DelApiServerRequest),
     ApiServerMigratedToNewScheduler(ApiServerMigratedToNewScheduler),
 
@@ -170,17 +172,27 @@ pub struct ApiServerMigratedToNewScheduler {}
 //====== Scheduler ======
 
 #[derive(Serialize, Deserialize, Debug)]
+pub enum SchedulerToSchedulerMessage {
+    SchedulerTakeOverRequest(SchedulerTakeOverRequest),
+    SchedulerTakeOverResponse(SchedulerTakeOverResponse),
+}
+
+#[derive(Serialize, Deserialize, Debug)]
 pub struct SchedulerTakeOverRequest {}
 
 #[derive(Serialize, Deserialize, Debug)]
 pub struct SchedulerTakeOverResponse {}
 
-//====== Handshake ======
+//====== HelloScheduler ======
 
-#[allow(clippy::enum_variant_names)]
 #[derive(Serialize, Deserialize, Debug)]
-pub enum HelloScheduler {
-    AddRunnerRequest(AddRunnerRequest),
-    AddApiServerRequest(AddApiServerRequest),
-    SchedulerTakeOverRequest(SchedulerTakeOverRequest),
+pub enum NodeType {
+    Runner,
+    ApiServer,
+    Scheduler,
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+pub struct HelloScheduler {
+    pub node_type: NodeType,
 }
