@@ -18,7 +18,7 @@ struct Cli {
 #[derive(Debug, clap::Subcommand)]
 enum Commands {
     Scheduler(scheduler::SchedulerArgs),
-    Runner {},
+    Runner(runner::RunnerArgs),
 }
 
 fn main() -> anyhow::Result<()> {
@@ -34,7 +34,7 @@ fn main() -> anyhow::Result<()> {
     let amain = async {
         match cli.command {
             Commands::Scheduler(args) => scheduler::scheduler_main(args).await,
-            Commands::Runner {} => runner::runner_main().await,
+            Commands::Runner(args) => runner::runner_main(args).await,
         }
     };
 
