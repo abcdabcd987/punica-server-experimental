@@ -121,12 +121,10 @@ class PunicaRunner:
 
     if ctx.temperature < 1e-5 or ctx.top_p < 1e-8:
       _, indices = torch.topk(last_token_logits, 2)
-      tokens = [int(index) for index in indices.tolist()]
     else:
       probs = torch.softmax(last_token_logits, dim=-1)
       indices = torch.multinomial(probs, num_samples=2)
-      tokens = [int(token) for token in indices.tolist()]
-    token = tokens[0]
+    token = int(indices.tolist()[0])
     return token
 
   def _is_stop(self, ctx: GenerationContext) -> int:
@@ -136,6 +134,13 @@ class PunicaRunner:
       return 2
     return 0
 
+  def _free_genctx(self, genidx: int):
+    ctx = self.genctx[genidx]
+    self.genctx[genidx] = None
+    self.available_genctx.add(genidx)
+    self.kvpool.free_block(ctx.kv_idx)
+
+  @torch.inference_mode()
   def prefill(
       self,
       input_ids: list[int],
@@ -179,8 +184,11 @@ class PunicaRunner:
     ctx.next_token_id = next_token_id
     ctx.output_ids.append(next_token_id)
     stop = self._is_stop(ctx)
+    if stop:
+      self._free_genctx(genidx)
     return genidx, next_token_id, stop
 
+  @torch.inference_mode()
   def batch_decode(self, genidxs: list[int]) -> list[tuple[int, int]]:
     input_ids = CatTensor(
         torch.tensor([self.genctx[idx].next_token_id for idx in genidxs],
@@ -204,53 +212,99 @@ class PunicaRunner:
       ctx.output_ids.append(next_token_id)
       stop = self._is_stop(ctx)
       outputs.append((next_token_id, stop))
+      if stop:
+        self._free_genctx(genidx)
     return outputs
 
 
-def dev_main():
+def textgen_demo():
+  from rich.console import Console
+  from rich.layout import Layout
+  from rich.live import Live
+  from rich.panel import Panel
+  from rich.text import Text
+
   model_path = "/dataset/hf/Llama-2-7b-chat-hf"
+  questions = [
+      "Give me a 3 day travel plan for Seattle.",
+      "Tell me something about University of Washington.",
+      "How to dial in an espresso shot?",
+  ]
+  prompt_tpl = '[INST] <<SYS>> You are a helpful, respectful and honest assistant. <</SYS>>\n{prompt} [/INST]\n'
+
   tokenizer = transformers.AutoTokenizer.from_pretrained(
       model_path, use_fast=True)
   runner = PunicaRunner(
       model_path=model_path,
       dtype="float16",
-      max_batch_size=1,
+      max_batch_size=len(questions),
   )
-  prompt = '[INST] <<SYS>>\nYou are a helpful, respectful and honest assistant.\n<</SYS>>\n\nGive me a 3 day travel plan for Seattle. [/INST]'
-  print(prompt, end="", flush=True)
-  text_last_len = len(prompt)
-  output_ids = list(tokenizer(prompt).input_ids)
+  console = Console()
+  layout = Layout()
+  layout.split_row(*[Layout(name=str(i)) for i in range(len(questions))])
 
-  genidx, next_id, stop = runner.prefill(
-      output_ids,
-      temperature=0.7,
-      stop_token_ids=[tokenizer.eos_token_id],
-      max_new_tokens=2048,
-  )
-  output_ids.append(next_id)
-  text = tokenizer.decode(
-      output_ids,
-      skip_special_tokens=True,
-      spaces_between_special_tokens=False,
-      clean_up_tokenization_spaces=True,
-  )
-  print(text[text_last_len:], end="", flush=True)
-  text_last_len = len(text)
+  with Live(layout, console=console, auto_refresh=False) as live:
+    # Prompt
+    output_ids = []
+    for i, question in enumerate(questions):
+      out = tokenizer(prompt_tpl.format(prompt=question)).input_ids
+      text = tokenizer.decode(
+          out,
+          skip_special_tokens=True,
+          spaces_between_special_tokens=False,
+          clean_up_tokenization_spaces=True,
+      )
+      layout[str(i)].update(Panel(Text(text, overflow="ellipsis")))
+      output_ids.append(out)
+    live.refresh()
 
-  while stop == 0:
-    next_id, stop = runner.batch_decode([genidx])[0]
-    output_ids.append(next_id)
-    text = tokenizer.decode(
-        output_ids,
-        skip_special_tokens=True,
-        spaces_between_special_tokens=False,
-        clean_up_tokenization_spaces=True,
-    )
-    print(text[text_last_len:], end="", flush=True)
-    text_last_len = len(text)
-  print()
-  print("stop reason: ", end="")
-  if stop == 1:
-    print("max_new_tokens")
-  elif stop == 2:
-    print("stop_token_ids")
+    # Prefill
+    genidxs = []
+    workset = set()
+    for i in range(len(questions)):
+      out = output_ids[i]
+      genidx, next_id, stop = runner.prefill(
+          out,
+          temperature=0.7,
+          repetition_penalty=1.1,
+          top_p=0.9,
+          stop_token_ids=[tokenizer.eos_token_id],
+          max_new_tokens=600,
+      )
+      genidxs.append(genidx)
+      out.append(next_id)
+      text = tokenizer.decode(
+          out,
+          skip_special_tokens=True,
+          spaces_between_special_tokens=False,
+          clean_up_tokenization_spaces=True,
+      )
+      layout[str(i)].update(Panel(Text(text, overflow="ellipsis")))
+      if stop == 0:
+        workset.add(i)
+      live.refresh()
+
+    # Decode
+    while workset:
+      ret = runner.batch_decode([genidxs[i] for i in workset])
+      for i, (next_id, stop) in zip(workset.copy(), ret):
+        output_ids[i].append(next_id)
+        text = tokenizer.decode(
+            output_ids[i],
+            skip_special_tokens=True,
+            spaces_between_special_tokens=False,
+            clean_up_tokenization_spaces=True,
+        )
+        if stop != 0:
+          workset.remove(i)
+          text += "\n\nstop reason: "
+          if stop == 1:
+            text += "max_new_tokens"
+          elif stop == 2:
+            text += "stop_token_ids"
+        layout[str(i)].update(Panel(Text(text, overflow="ellipsis")))
+      live.refresh()
+
+
+def dev_main():
+  textgen_demo()
