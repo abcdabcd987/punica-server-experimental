@@ -1,9 +1,10 @@
-#[macro_use(info, error)]
+#[macro_use(info, error, debug)]
 extern crate tracing;
 
 mod comm;
 mod runner;
 mod scheduler;
+mod utils;
 
 use clap::Parser;
 use tracing_subscriber::layer::SubscriberExt;
@@ -28,7 +29,13 @@ fn main() -> anyhow::Result<()> {
             tracing_subscriber::EnvFilter::try_from_default_env()
                 .unwrap_or_else(|_| "punica=debug".into()),
         )
-        .with(tracing_subscriber::fmt::layer())
+        .with(
+            tracing_subscriber::fmt::layer()
+                .compact()
+                .with_file(true)
+                .with_line_number(true)
+                .with_target(false),
+        )
         .init();
 
     let amain = async {

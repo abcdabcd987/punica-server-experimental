@@ -91,6 +91,17 @@ enum NodeType {
     Scheduler,
 }
 
+impl std::fmt::Display for NodeType {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            NodeType::Unknown => write!(f, "Unknown"),
+            NodeType::Runner => write!(f, "Runner"),
+            NodeType::ApiServer => write!(f, "ApiServer"),
+            NodeType::Scheduler => write!(f, "Scheduler"),
+        }
+    }
+}
+
 struct Connection {
     addr: SocketAddr,
     ct: CancellationToken,
@@ -264,6 +275,10 @@ async fn conn_handle_binary_message(
                 comm::NodeType::ApiServer => NodeType::ApiServer,
                 comm::NodeType::Scheduler => NodeType::Scheduler,
             };
+            info!(
+                "New connection from {} registered as {}",
+                conn.addr, node_type
+            );
         }
         NodeType::Runner => {
             conn_handle_runner_message(
@@ -297,6 +312,7 @@ async fn conn_handle_runner_message(
     tx: Sender<Message>,
 ) {
     use comm::RunnerToSchedulerMessage as M;
+    debug!("{:?}", msg);
     match msg {
         M::AddRunnerRequest(m) => {
             env.scheduler.add_runner(conn.addr, tx, m).await
@@ -390,21 +406,15 @@ impl Scheduler {
         // Add GPUs
         {
             let mut gpus = self.gpus.write().unwrap();
-            for (idx, prop) in msg.devices.into_iter().enumerate() {
+            for prop in msg.devices.into_iter() {
                 if gpus.contains_key(&prop.uuid) {
                     error!("GPU {} already exists. Skip.", prop.uuid);
                     continue;
                 }
                 info!(
-                    "Add Runner {} GPU {}/{}. UUID: {}, Name: {}, sm_{}{}, Memory: {:.3} GiB",
-                    runner.id,
-                    idx + 1,
-                    num_gpus,
-                    prop.uuid,
-                    prop.name,
-                    prop.total_memory as f32 / 2f32.powi(30),
-                    prop.sm_major,
-                    prop.sm_minor,
+                    runner = %runner.id,
+                    gpu = ?prop,
+                    "Add GPU to runner.",
                 );
                 gpus.insert(
                     prop.uuid,
@@ -422,9 +432,11 @@ impl Scheduler {
             runner
                 .tx
                 .send(Message::Binary(
-                    postcard::to_stdvec(&comm::AcquireGpuCommand {
-                        gpu_uuid: *uuid,
-                    })
+                    postcard::to_stdvec(
+                        &comm::SchedulerToRunnerMessage::AcquireGpuCommand(
+                            comm::AcquireGpuCommand { gpu_uuid: *uuid },
+                        ),
+                    )
                     .unwrap(),
                 ))
                 .await

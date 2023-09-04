@@ -75,7 +75,7 @@ pub enum SchedulerToRunnerMessage {
     CancelTextGen(CancelTextGen),
 }
 
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct CudaDeviceProp {
     pub uuid: Uuid,
     pub name: String,

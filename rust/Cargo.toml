@@ -13,15 +13,18 @@ futures = "0.3.28"
 log = "0.4.20"
 postcard = { version = "1.0.6", features = ["use-std"] }
 pyo3 = { version = "0.19.2", features = ["auto-initialize"] }
+rmp-serde = "1.1.2"
 serde = { version = "1.0.185", features = ["derive"] }
 serde_json = "1.0.105"
 tokenizers = { version = "0.13.4", default-features = false, features = ["esaxx_fast", "onig"] }
 tokio = { version = "1.32.0", features = ["full"] }
+tokio-tungstenite = { version = "0.20.0", features = ["rustls", "rustls-tls-native-roots"] }
 tokio-util = "0.7.8"
 tower = { version = "0.4.13", features = ["full"] }
 tower-http = { version = "0.4.3", features = ["full"] }
 tracing = "0.1.37"
 tracing-subscriber = { version = "0.3.17", features = ["env-filter", "parking_lot"] }
+url = "2.4.1"
 uuid = { version = "1.4.1", features = ["v7", "serde", "fast-rng"] }
 
 [build-dependencies]

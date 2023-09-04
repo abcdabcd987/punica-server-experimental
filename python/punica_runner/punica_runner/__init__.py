@@ -2,7 +2,6 @@ import dataclasses
 import functools
 import multiprocessing
 
-import pynvml
 import torch
 import transformers
 
@@ -28,22 +27,6 @@ def run_in_subprocess(f):
     return q.get()
 
   return wrapper
-
-
-@run_in_subprocess
-def get_all_gpu_info():
-  pynvml.nvmlInit()
-  cnt = pynvml.nvmlDeviceGetCount()
-  gpu_info_list = []
-  for i in range(cnt):
-    handle = pynvml.nvmlDeviceGetHandleByIndex(i)
-    meminfo = pynvml.nvmlDeviceGetMemoryInfo(handle)
-    uuid = pynvml.nvmlDeviceGetUUID(handle).removeprefix("GPU-")
-    name = pynvml.nvmlDeviceGetName(handle)
-    sm_major, sm_minor = pynvml.nvmlDeviceGetCudaComputeCapability(handle)
-    gpu_info_list.append((uuid, name, meminfo.total, sm_major, sm_minor))
-  pynvml.nvmlShutdown()
-  return gpu_info_list
 
 
 def prepare_logits_processor(
