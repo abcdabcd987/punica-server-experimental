@@ -25,22 +25,11 @@ pub enum SchedulerMessage {
 impl SchedulerConnection {
     pub async fn connect_to_scheduler(url: Url) -> anyhow::Result<Self> {
         info!("Connecting to scheduler: {}", url);
-        let (mut ws, _) =
+        let (ws, _) =
             tokio_tungstenite::connect_async(&url).await.with_context(
                 || format!("Failed to connect to scheduler: {}", url),
             )?;
         let addr = get_ws_peer_addr(&ws);
-
-        ws.send(Message::Binary(
-            postcard::to_stdvec(&comm::HelloScheduler {
-                node_type: comm::NodeType::Runner,
-            })
-            .unwrap(),
-        ))
-        .await
-        .with_context(|| {
-            format!("Failed to send HelloScheduler. scheduler: {}", url)
-        })?;
 
         info!("Connected to scheduler. url: {}, addr: {}", url, addr);
         Ok(Self { url, addr, ws })
@@ -94,6 +83,7 @@ impl SchedulerConnection {
     }
 
     pub async fn close(&mut self) -> anyhow::Result<()> {
-        self.ws.close(None).await.map_err(|e| e.into())
+        self.ws.close(None).await?;
+        Ok(())
     }
 }

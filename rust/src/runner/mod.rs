@@ -25,9 +25,11 @@ pub async fn runner_main(args: RunnerArgs) -> anyhow::Result<()> {
     let runner = Runner::new()?;
     info!(devices = ?runner.devprops, "GPUs");
 
+    let mut url = args.scheduler_url.clone();
+    url.path_segments_mut().unwrap().push("v1").push("runner");
+
     let ct = CancellationToken::new();
-    let mut conn =
-        SchedulerConnection::connect_to_scheduler(args.scheduler_url).await?;
+    let mut conn = SchedulerConnection::connect_to_scheduler(url).await?;
 
     runner.register_to_scheduler(&mut conn).await?;
 
@@ -38,20 +40,21 @@ pub async fn runner_main(args: RunnerArgs) -> anyhow::Result<()> {
         shutdown: ct.clone(),
         _shutdown_complete: shutdown_complete_tx,
     };
+    let conn = tokio::spawn(async move { conn.run().await });
 
-    tokio::select! {
-        res = conn.run() => {
-            if let Err(e) = res {
-                error!(cause = %e, "Scheduler connection exited with error");
-            }
-        }
+    let ret: anyhow::Result<()> = tokio::select! {
+        ret = conn => ret.unwrap(),
         _ = tokio::signal::ctrl_c() => {
             info!("Ctrl-C received.");
+            Ok(())
         }
+    };
+    if let Err(e) = ret {
+        error!(%e);
     }
+
     info!("Shutting down...");
     ct.cancel();
-    drop(conn);
     let _ = shutdown_complete_rx.recv().await;
     info!("Shutdown complete.");
     Ok(())

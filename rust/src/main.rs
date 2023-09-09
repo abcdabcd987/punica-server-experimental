@@ -1,4 +1,4 @@
-#[macro_use(info, error, debug)]
+#[macro_use(info, error)]
 extern crate tracing;
 
 mod comm;

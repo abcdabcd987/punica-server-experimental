@@ -4,6 +4,13 @@ use uuid::Uuid;
 //====== Common ======
 
 #[derive(Serialize, Deserialize, Debug)]
+pub enum NodeType {
+    Runner,
+    ApiServer,
+    Scheduler,
+}
+
+#[derive(Serialize, Deserialize, Debug)]
 pub struct TextGenParams {
     pub n: u32,
     pub min_tokens: u32,
@@ -182,17 +189,3 @@ pub struct SchedulerTakeOverRequest {}
 
 #[derive(Serialize, Deserialize, Debug)]
 pub struct SchedulerTakeOverResponse {}
-
-//====== HelloScheduler ======
-
-#[derive(Serialize, Deserialize, Debug)]
-pub enum NodeType {
-    Runner,
-    ApiServer,
-    Scheduler,
-}
-
-#[derive(Serialize, Deserialize, Debug)]
-pub struct HelloScheduler {
-    pub node_type: NodeType,
-}
