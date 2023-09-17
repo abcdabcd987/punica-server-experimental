@@ -127,9 +127,11 @@ impl Connection {
         };
 
         match conn.run().await {
-            Ok(()) => info!(%conn.addr, ?conn.node_type, "Connection closed."),
+            Ok(()) => {
+                info!(addr=%conn.addr, node_type=?conn.node_type, "Connection closed.")
+            }
             Err(e) => {
-                error!(%conn.addr, ?conn.node_type, cause=%e, "Connection error. Connection closed.");
+                error!(addr=%conn.addr, node_type=?conn.node_type, cause=%e, "Connection error. Connection closed.");
             }
         }
     }

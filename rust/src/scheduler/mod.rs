@@ -1,10 +1,11 @@
 mod server;
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use std::net::SocketAddr;
-use std::sync::{Arc, Mutex, RwLock};
+use std::sync::{Arc, Mutex};
 
 use axum::extract::ws::Message;
+use dashmap::DashMap;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
@@ -55,8 +56,8 @@ pub async fn scheduler_main(args: SchedulerArgs) -> anyhow::Result<()> {
 }
 
 pub struct Scheduler {
-    gpus: RwLock<HashMap<Uuid, Arc<Gpu>>>,
-    runners: RwLock<HashMap<Uuid, Arc<Runner>>>,
+    gpus: DashMap<Uuid, Arc<Gpu>>,
+    runners: DashMap<Uuid, Arc<Runner>>,
 }
 
 enum GpuState {
@@ -89,10 +90,7 @@ impl Runner {
 
 impl Scheduler {
     pub fn new() -> Arc<Scheduler> {
-        Arc::new(Scheduler {
-            gpus: RwLock::new(HashMap::new()),
-            runners: RwLock::new(HashMap::new()),
-        })
+        Arc::new(Scheduler { gpus: DashMap::new(), runners: DashMap::new() })
     }
 
     pub async fn add_runner(
@@ -102,21 +100,17 @@ impl Scheduler {
         msg: comm::AddRunnerRequest,
     ) {
         // Add runner
-        let runner = {
-            let mut runners = self.runners.write().unwrap();
-            if runners.contains_key(&msg.runner_id) {
-                error!("Runner {} already exists. Skip.", msg.runner_id);
-                return;
-            }
-            let runner = Arc::new(Runner {
-                id: msg.runner_id,
-                addr,
-                tx,
-                devices: msg.devices.iter().map(|prop| prop.uuid).collect(),
-            });
-            runners.insert(msg.runner_id, runner.clone());
-            runner
-        };
+        if self.runners.contains_key(&msg.runner_id) {
+            error!("Runner {} already exists. Skip.", msg.runner_id);
+            return;
+        }
+        let runner = Arc::new(Runner {
+            id: msg.runner_id,
+            addr,
+            tx,
+            devices: msg.devices.iter().map(|prop| prop.uuid).collect(),
+        });
+        self.runners.insert(msg.runner_id, runner.clone());
         let num_gpus = msg.devices.len();
         info!(
             "Add runner {} from {} with {} GPUs",
@@ -124,27 +118,24 @@ impl Scheduler {
         );
 
         // Add GPUs
-        {
-            let mut gpus = self.gpus.write().unwrap();
-            for prop in msg.devices.into_iter() {
-                if gpus.contains_key(&prop.uuid) {
-                    error!("GPU {} already exists. Skip.", prop.uuid);
-                    continue;
-                }
-                info!(
-                    runner = %runner.id,
-                    gpu = ?prop,
-                    "Add GPU to runner.",
-                );
-                gpus.insert(
-                    prop.uuid,
-                    Arc::new(Gpu {
-                        prop,
-                        runner: msg.runner_id,
-                        state: Mutex::new(GpuState::Acquiring),
-                    }),
-                );
+        for prop in msg.devices.into_iter() {
+            if self.gpus.contains_key(&prop.uuid) {
+                error!("GPU {} already exists. Skip.", prop.uuid);
+                continue;
             }
+            info!(
+                runner = %runner.id,
+                gpu = ?prop,
+                "Add GPU to runner.",
+            );
+            self.gpus.insert(
+                prop.uuid,
+                Arc::new(Gpu {
+                    prop,
+                    runner: msg.runner_id,
+                    state: Mutex::new(GpuState::Acquiring),
+                }),
+            );
         }
 
         // Acquire GPUs
@@ -160,8 +151,7 @@ impl Scheduler {
     }
 
     pub fn handle_acquire_gpu_resp(&self, msg: comm::AcquireGpuResponse) {
-        let gpus = self.gpus.read().unwrap();
-        let gpu = gpus.get(&msg.gpu_uuid).unwrap();
+        let gpu = self.gpus.get(&msg.gpu_uuid).unwrap();
         let mut state = gpu.state.lock().unwrap();
         match *state {
             GpuState::Acquiring => {

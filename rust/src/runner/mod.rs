@@ -3,13 +3,16 @@ mod device_query;
 mod tokenizer;
 
 use std::path::PathBuf;
+use std::sync::Arc;
 
+use anyhow::Context;
 use tokio::sync::mpsc;
+use tokio_tungstenite::tungstenite::Message;
 use tokio_util::sync::CancellationToken;
 use url::Url;
 use uuid::Uuid;
 
-use self::conn::{SchedulerConnection, SchedulerMessage};
+use self::conn::SchedulerConnection;
 use self::device_query::device_query;
 use crate::comm;
 
@@ -22,28 +25,34 @@ pub struct RunnerArgs {
 }
 
 pub async fn runner_main(args: RunnerArgs) -> anyhow::Result<()> {
-    let runner = Runner::new()?;
+    let ct = CancellationToken::new();
+    let (shutdown_complete_tx, mut shutdown_complete_rx) = mpsc::channel(1);
+    let runner = Arc::new(Runner::new()?);
     info!(devices = ?runner.devprops, "GPUs");
 
     let mut url = args.scheduler_url.clone();
     url.path_segments_mut().unwrap().push("v1").push("runner");
 
-    let ct = CancellationToken::new();
-    let mut conn = SchedulerConnection::connect_to_scheduler(url).await?;
+    let (ws, _) = tokio_tungstenite::connect_async(&url)
+        .await
+        .with_context(|| format!("Failed to connect to scheduler: {}", url))?;
+    let conn = SchedulerConnection::new(
+        url,
+        ws,
+        ct.clone(),
+        shutdown_complete_tx.clone(),
+        runner.clone(),
+    );
 
-    runner.register_to_scheduler(&mut conn).await?;
+    runner.set_scheduler_tx(conn.ch_send.clone()).await;
+    runner.register_to_scheduler().await;
 
-    let (shutdown_complete_tx, mut shutdown_complete_rx) = mpsc::channel(1);
-    let mut conn = ConnHandler {
-        runner,
-        conn,
-        shutdown: ct.clone(),
-        _shutdown_complete: shutdown_complete_tx,
-    };
-    let conn = tokio::spawn(async move { conn.run().await });
+    let conn = tokio::spawn(async move { conn.serve().await });
 
     let ret: anyhow::Result<()> = tokio::select! {
-        ret = conn => ret.unwrap(),
+        _ = conn => {
+            Ok(())
+        },
         _ = tokio::signal::ctrl_c() => {
             info!("Ctrl-C received.");
             Ok(())
@@ -54,6 +63,7 @@ pub async fn runner_main(args: RunnerArgs) -> anyhow::Result<()> {
     }
 
     info!("Shutting down...");
+    drop(shutdown_complete_tx);
     ct.cancel();
     let _ = shutdown_complete_rx.recv().await;
     info!("Shutdown complete.");
@@ -63,62 +73,51 @@ pub async fn runner_main(args: RunnerArgs) -> anyhow::Result<()> {
 pub struct Runner {
     uuid: Uuid,
     devprops: Vec<comm::CudaDeviceProp>,
+    scheduler_tx: tokio::sync::RwLock<Option<mpsc::Sender<Message>>>,
 }
 
 impl Runner {
     pub fn new() -> anyhow::Result<Self> {
         let uuid = Uuid::now_v7();
         let devprops = device_query()?;
-        Ok(Self { uuid, devprops })
+        Ok(Self {
+            uuid,
+            devprops,
+            scheduler_tx: tokio::sync::RwLock::new(None),
+        })
     }
 
-    pub async fn register_to_scheduler(
-        &self,
-        conn: &mut SchedulerConnection,
-    ) -> anyhow::Result<()> {
-        conn.send_message(comm::RunnerToSchedulerMessage::AddRunnerRequest(
+    pub async fn set_scheduler_tx(&self, scheduler_tx: mpsc::Sender<Message>) {
+        self.scheduler_tx.write().await.replace(scheduler_tx);
+    }
+
+    async fn send_message(&self, msg: &comm::RunnerToSchedulerMessage) {
+        let binary =
+            postcard::to_stdvec(msg).expect("Failed to serialize message");
+        let scheduler_tx = self.scheduler_tx.read().await;
+        scheduler_tx
+            .as_ref()
+            .unwrap()
+            .send(Message::Binary(binary))
+            .await
+            .unwrap();
+    }
+
+    pub async fn register_to_scheduler(&self) {
+        self.send_message(&comm::RunnerToSchedulerMessage::AddRunnerRequest(
             comm::AddRunnerRequest {
                 runner_id: self.uuid,
                 devices: self.devprops.clone(),
             },
         ))
-        .await?;
-        Ok(())
+        .await;
     }
 
-    pub fn handle_scheduler_message(
+    pub async fn handle_scheduler_message(
         &self,
-        _conn: &mut SchedulerConnection,
         msg: comm::SchedulerToRunnerMessage,
     ) -> anyhow::Result<()> {
         info!(?msg, "TODO: handle_scheduler_message");
-        Ok(())
-    }
-}
-
-struct ConnHandler {
-    runner: Runner,
-    conn: SchedulerConnection,
-    shutdown: CancellationToken,
-    _shutdown_complete: mpsc::Sender<()>,
-}
-
-impl ConnHandler {
-    async fn run(&mut self) -> anyhow::Result<()> {
-        while !self.shutdown.is_cancelled() {
-            let msg = tokio::select! {
-                msg = self.conn.recv_message() => msg?,
-                _ = self.shutdown.cancelled() => break,
-            };
-            match msg {
-                SchedulerMessage::Message(msg) => {
-                    self.runner.handle_scheduler_message(&mut self.conn, msg)?
-                }
-                SchedulerMessage::Alive => {}
-                SchedulerMessage::End => break,
-            }
-        }
-        self.conn.close().await?;
         Ok(())
     }
 }

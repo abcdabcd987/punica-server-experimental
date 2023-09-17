@@ -1,89 +1,126 @@
 use std::net::SocketAddr;
+use std::ops::ControlFlow;
+use std::sync::Arc;
 
-use anyhow::Context;
+use futures::stream::{SplitSink, SplitStream};
 use futures::{SinkExt, StreamExt};
 use tokio::net::TcpStream;
-use tokio_tungstenite::tungstenite::Message;
+use tokio::sync::mpsc;
+use tokio_tungstenite::tungstenite::{Error as WsError, Message};
 use tokio_tungstenite::{MaybeTlsStream, WebSocketStream};
+use tokio_util::sync::CancellationToken;
 use url::Url;
 
-use crate::comm;
+use super::Runner;
 use crate::utils::get_ws_peer_addr;
+
+pub type WebSocket = WebSocketStream<MaybeTlsStream<TcpStream>>;
 
 pub struct SchedulerConnection {
     url: Url,
     addr: SocketAddr,
-    ws: WebSocketStream<MaybeTlsStream<TcpStream>>,
-}
-
-pub enum SchedulerMessage {
-    End,
-    Alive,
-    Message(comm::SchedulerToRunnerMessage),
+    ws_send: SplitSink<WebSocket, Message>,
+    ws_recv: SplitStream<WebSocket>,
+    pub ch_send: mpsc::Sender<Message>,
+    ch_recv: mpsc::Receiver<Message>,
+    shutdown: CancellationToken,
+    _shutdown_complete: mpsc::Sender<()>,
+    runner: Arc<Runner>,
 }
 
 impl SchedulerConnection {
-    pub async fn connect_to_scheduler(url: Url) -> anyhow::Result<Self> {
-        info!("Connecting to scheduler: {}", url);
-        let (ws, _) =
-            tokio_tungstenite::connect_async(&url).await.with_context(
-                || format!("Failed to connect to scheduler: {}", url),
-            )?;
+    pub fn new(
+        url: Url,
+        ws: WebSocket,
+        shutdown: CancellationToken,
+        shutdown_complete: mpsc::Sender<()>,
+        runner: Arc<Runner>,
+    ) -> Self {
         let addr = get_ws_peer_addr(&ws);
-
-        info!("Connected to scheduler. url: {}, addr: {}", url, addr);
-        Ok(Self { url, addr, ws })
-    }
-
-    pub async fn send_message(
-        &mut self,
-        msg: comm::RunnerToSchedulerMessage,
-    ) -> anyhow::Result<()> {
-        let msg = postcard::to_allocvec(&msg).with_context(|| {
-            format!(
-                "Failed to serialize message to scheduler. url: {}, addr: {}",
-                self.url, self.addr
-            )
-        })?;
-        self.ws.send(Message::Binary(msg)).await?;
-        Ok(())
-    }
-
-    pub async fn recv_message(&mut self) -> anyhow::Result<SchedulerMessage> {
-        let msg = self.ws.next().await;
-        match msg {
-            Some(Ok(Message::Ping(_))) => Ok(SchedulerMessage::Alive),
-            Some(Ok(Message::Pong(_))) => Ok(SchedulerMessage::Alive),
-            Some(Ok(Message::Binary(msg))) => {
-                let msg = postcard::from_bytes(&msg).with_context(
-                    || format!("Failed to deserialize message from scheduler. url: {}, addr: {}", self.url, self.addr),
-                )?;
-                Ok(SchedulerMessage::Message(msg))
-            }
-            Some(Ok(Message::Close(_))) => {
-                info!(
-                    "Scheduler closed connection. url: {}, addr: {}",
-                    self.url, self.addr
-                );
-                Ok(SchedulerMessage::End)
-            }
-            Some(Ok(Message::Text(_))) => Err(anyhow::anyhow!(
-                "Scheduler sent unexpected text message. url: {}, addr: {}",
-                self.url,
-                self.addr
-            )),
-            Some(Ok(Message::Frame(_))) => Err(anyhow::anyhow!(
-                "Scheduler sent unexpected frame. url: {}, addr: {}",
-                self.url,
-                self.addr
-            )),
-            Some(Err(e)) => Err(e.into()),
-            None => Ok(SchedulerMessage::End),
+        let (ws_send, ws_recv) = ws.split();
+        let (ch_send, ch_recv) = mpsc::channel(32);
+        Self {
+            url,
+            addr,
+            ws_send,
+            ws_recv,
+            ch_send,
+            ch_recv,
+            shutdown,
+            _shutdown_complete: shutdown_complete,
+            runner,
         }
     }
 
-    pub async fn close(&mut self) -> anyhow::Result<()> {
-        self.ws.close(None).await?;
+    pub async fn serve(mut self) {
+        match self.run().await {
+            Ok(()) => info!(url=%self.url, addr=%self.addr, "Connection closed."),
+            Err(e) => {
+                error!(url=%self.url, addr=%self.addr, cause=%e, "Connection error. Connection closed.");
+            }
+        }
+        let mut ws = self.ws_send.reunite(self.ws_recv).unwrap();
+        let _ = ws.close(None).await;
+    }
+
+    async fn run(&mut self) -> anyhow::Result<()> {
+        while !self.shutdown.is_cancelled() {
+            let ret = tokio::select! {
+                msg = self.ws_recv.next() => {
+                    self.handle_message(msg).await?
+                },
+                recv = self.ch_recv.recv() => {
+                    self.forward_message(recv).await?
+                },
+                _ = self.shutdown.cancelled() => ControlFlow::Break(()),
+            };
+            match ret {
+                ControlFlow::Continue(()) => (),
+                ControlFlow::Break(()) => break,
+            }
+        }
         Ok(())
+    }
+
+    async fn handle_message(
+        &mut self,
+        msg: Option<Result<Message, WsError>>,
+    ) -> anyhow::Result<ControlFlow<()>> {
+        match msg {
+            Some(Ok(Message::Text(_))) => {
+                Err(anyhow::anyhow!("Unexpected text message"))
+            }
+            Some(Ok(Message::Ping(_))) => {
+                // Nothing to do. Handled by websocket library.
+                Ok(ControlFlow::Continue(()))
+            }
+            Some(Ok(Message::Pong(_))) => {
+                // Nothing to do.
+                Ok(ControlFlow::Continue(()))
+            }
+            Some(Ok(Message::Frame(_))) => Ok(ControlFlow::Break(())),
+            Some(Ok(Message::Close(_))) => Ok(ControlFlow::Break(())),
+            Some(Err(e)) => Err(e.into()),
+            None => Ok(ControlFlow::Continue(())),
+            Some(Ok(Message::Binary(m))) => {
+                self.runner
+                    .handle_scheduler_message(postcard::from_bytes(&m)?)
+                    .await?;
+                Ok(ControlFlow::Continue(()))
+            }
+        }
+    }
+
+    async fn forward_message(
+        &mut self,
+        recv: Option<Message>,
+    ) -> anyhow::Result<ControlFlow<()>> {
+        match recv {
+            Some(msg) => {
+                self.ws_send.send(msg).await?;
+                Ok(ControlFlow::Continue(()))
+            }
+            None => Ok(ControlFlow::Break(())),
+        }
     }
 }
