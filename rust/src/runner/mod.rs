@@ -1,5 +1,7 @@
 mod conn;
+mod debug_executor_main;
 mod device_query;
+mod executor;
 mod tokenizer;
 
 use std::path::PathBuf;
@@ -13,6 +15,7 @@ use url::Url;
 use uuid::Uuid;
 
 use self::conn::SchedulerConnection;
+pub use self::debug_executor_main::{debug_executor_main, DebugExecutorArgs};
 use self::device_query::device_query;
 use crate::comm;
 

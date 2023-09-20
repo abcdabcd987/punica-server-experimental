@@ -41,6 +41,10 @@ impl Tokenizer {
         Ok(Self { tokenizer, eos_id })
     }
 
+    pub fn eos_id(&self) -> u32 {
+        self.eos_id
+    }
+
     pub fn encode(&self, text: &str) -> anyhow::Result<Vec<u32>> {
         self.tokenizer
             .encode(text, false)

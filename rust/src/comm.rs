@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use serde_repr::{Deserialize_repr, Serialize_repr};
 use uuid::Uuid;
 
 //====== Common ======
@@ -11,17 +12,15 @@ pub enum NodeType {
 }
 
 #[derive(Serialize, Deserialize, Debug)]
-pub struct TextGenParams {
-    pub n: u32,
+pub struct GenerationConfig {
     pub min_tokens: u32,
     pub max_tokens: u32,
-    pub seed: u64,
+    pub max_new_tokens: u32,
+    pub stop_token_id: u32,
+
     pub temperature: f32,
+    pub repetition_penalty: f32,
     pub top_p: f32,
-    pub presence_penalty: f32,
-    pub frequency_penalty: f32,
-    pub ignore_eos: bool,
-    pub stop: Vec<String>,
 }
 
 //====== TextGen ======
@@ -30,13 +29,15 @@ pub struct TextGenParams {
 pub struct TextGenRequest {
     pub request_id: Uuid,
     pub prompt: String,
-    pub params: TextGenParams,
+    pub params: GenerationConfig,
 }
 
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(Serialize_repr, Deserialize_repr, Debug, PartialEq, Eq)]
+#[repr(u8)]
 pub enum FinishReason {
-    Stop,
-    Length,
+    NotFinished = 0,
+    Stop = 1,
+    Length = 2,
 }
 
 #[derive(Serialize, Deserialize, Debug)]

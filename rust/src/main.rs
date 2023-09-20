@@ -20,6 +20,7 @@ struct Cli {
 enum Commands {
     Scheduler(scheduler::SchedulerArgs),
     Runner(runner::RunnerArgs),
+    DebugExecutor(runner::DebugExecutorArgs),
 }
 
 fn main() -> anyhow::Result<()> {
@@ -42,6 +43,9 @@ fn main() -> anyhow::Result<()> {
         match cli.command {
             Commands::Scheduler(args) => scheduler::scheduler_main(args).await,
             Commands::Runner(args) => runner::runner_main(args).await,
+            Commands::DebugExecutor(args) => {
+                runner::debug_executor_main(args).await
+            }
         }
     };
 
