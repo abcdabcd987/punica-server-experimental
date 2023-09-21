@@ -3,6 +3,7 @@ import enum
 import uuid
 from typing import TypedDict
 
+import numpy as np
 from punica.models.llama import LlamaForCausalLM
 from punica.utils import BatchedKvCache
 from punica.utils import CatTensor
@@ -206,3 +207,54 @@ class GpuExecutor:
         "token_ids": token_ids,
         "finish_reasons": finish_reasons,
     }
+
+
+class FakeGpuExecutor:
+
+  def __init__(self):
+    self._reqctx: dict[uuid.UUID, dict] = {}
+
+  def add_request(
+      self,
+      reqid: uuid.UUID,
+      input_ids: list[int],
+      gencfg: GenerationConfig,
+  ):
+    rng = np.random.Generator(np.random.PCG64(seed=sum(input_ids)))
+    self._reqctx[reqid] = {
+        "gencfg": gencfg,
+        "rng": rng,
+    }
+
+  def _del_request(self, reqid: uuid.UUID):
+    del self._reqctx[reqid]
+
+  def cancel_request(self, reqid: uuid.UUID):
+    self._del_request(reqid)
+
+  def _fake_batch_generate(
+      self, reqs: list[uuid.UUID]) -> TextGenerationChunkResponse:
+    token_ids = []
+    finish_reasons = []
+    for reqid in reqs:
+      reqctx = self._reqctx[reqid]
+      if reqctx["rng"].random() < 0.1:
+        next_token_id = reqctx["gencfg"]["stop_token_id"]
+        finish = FinishReason.Stop
+      else:
+        next_token_id = reqctx["rng"].integers(1000, 50000)
+        finish = FinishReason.NotFinished
+      token_ids.append(int(next_token_id))
+      finish_reasons.append(finish.value)
+      if finish != FinishReason.NotFinished:
+        self._del_request(reqid)
+    return {
+        "token_ids": token_ids,
+        "finish_reasons": finish_reasons,
+    }
+
+  def batch_prefill(self, reqs: list[uuid.UUID]) -> TextGenerationChunkResponse:
+    return self._fake_batch_generate(reqs)
+
+  def batch_decode(self, reqs: list[uuid.UUID]) -> TextGenerationChunkResponse:
+    return self._fake_batch_generate(reqs)

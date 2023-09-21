@@ -1,10 +1,11 @@
 import os
 import struct
 import sys
-import uuid
 import traceback
+import uuid
 
 import msgpack
+from punica_runner.gpu_executor.gpu_executor import FakeGpuExecutor
 from punica_runner.gpu_executor.gpu_executor import GpuExecutor
 
 stdin = os.fdopen(sys.stdin.fileno(), "rb")
@@ -28,12 +29,15 @@ def write_msg(obj):
 
 def handle_init(msg):
   global exe
-  exe = GpuExecutor(
-      model_path=msg["model_path"],
-      dtype_str=msg["dtype_str"],
-      block_len=msg["block_len"],
-      kvpool_capacity=msg["kvpool_capacity"],
-  )
+  if msg["use_fake"]:
+    exe = FakeGpuExecutor()
+  else:
+    exe = GpuExecutor(
+        model_path=msg["model_path"],
+        dtype_str=msg["dtype_str"],
+        block_len=msg["block_len"],
+        kvpool_capacity=msg["kvpool_capacity"],
+    )
   return 0
 
 

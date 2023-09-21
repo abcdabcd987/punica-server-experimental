@@ -10,6 +10,8 @@ use crate::comm;
 #[derive(Debug, clap::Args)]
 pub struct DebugExecutorArgs {
     #[arg(long)]
+    pub fake: bool,
+    #[arg(long)]
     pub model_path: PathBuf,
     #[arg(long, default_value_t = 0)]
     pub gpu_index: usize,
@@ -26,12 +28,16 @@ pub async fn debug_executor_main(
         "How to dial in an espresso shot? Please don't use emoji.",
     ];
 
-    let devprops = device_query()?;
-    let gpu_uuid = devprops[args.gpu_index].uuid;
-    info!(gpu=?devprops[args.gpu_index]);
+    let gpu_uuid = if args.fake {
+        Uuid::now_v7()
+    } else {
+        let devprops = device_query()?;
+        info!(gpu=?devprops[args.gpu_index]);
+        devprops[args.gpu_index].uuid
+    };
+
     let tokenizer = Tokenizer::new(&args.model_path)?;
     info!("Tokenizer loaded.");
-
     let (mut child, mut executor) = GpuExecutor::spawn(gpu_uuid)?;
     let wait_executor = tokio::spawn(async move {
         let ec = child.wait().await.unwrap();
@@ -43,15 +49,20 @@ pub async fn debug_executor_main(
     });
     info!("Executor spawned.");
 
-    executor
-        .init(
-            &args.model_path.display().to_string(),
-            "float16",
-            16,
-            (1024 * questions.len() / 16) as u32,
-        )
-        .await?;
-    info!("Executor initialized.");
+    if args.fake {
+        executor.init_fake().await?;
+        info!("FakeGpuExecutor initialized.");
+    } else {
+        executor
+            .init(
+                &args.model_path.display().to_string(),
+                "float16",
+                16,
+                (1024 * questions.len() / 16) as u32,
+            )
+            .await?;
+        info!("GpuExecutor initialized.");
+    }
 
     let mut reqids = Vec::new();
     let mut output_ids = Vec::new();

@@ -21,6 +21,7 @@ enum Request<'a> {
 
 #[derive(Serialize, Debug)]
 struct Init<'a> {
+    use_fake: bool,
     model_path: &'a str,
     dtype_str: &'a str,
     block_len: u32,
@@ -105,10 +106,24 @@ impl GpuExecutor {
         kvpool_capacity: u32,
     ) -> anyhow::Result<()> {
         let init = Request::Init(Init {
+            use_fake: false,
             model_path,
             dtype_str,
             block_len,
             kvpool_capacity,
+        });
+        self.write_msg(&init).await?;
+        self.read_msg::<i32>().await?;
+        Ok(())
+    }
+
+    pub async fn init_fake(&mut self) -> anyhow::Result<()> {
+        let init = Request::Init(Init {
+            use_fake: true,
+            model_path: "",
+            dtype_str: "",
+            block_len: 0,
+            kvpool_capacity: 0,
         });
         self.write_msg(&init).await?;
         self.read_msg::<i32>().await?;
