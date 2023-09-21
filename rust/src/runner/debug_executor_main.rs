@@ -21,8 +21,9 @@ pub async fn debug_executor_main(
     let template = "[INST] <<SYS>> You are a helpful, respectful and honest assistant. <</SYS>>\n{prompt} [/INST]\n";
     let questions = [
         "Give me a 3 day travel plan for Seattle.",
+        "How to grow tomatoes in a greenhouse?",
         "Tell me something about University of Washington.",
-        "How to dial in an espresso shot?",
+        "How to dial in an espresso shot? Please don't use emoji.",
     ];
 
     let devprops = device_query()?;
@@ -85,12 +86,14 @@ pub async fn debug_executor_main(
     info!("batch_prefill done.");
 
     let mut workset: Vec<_> = (0..questions.len()).collect();
+    let mut steps = 0;
     while !workset.is_empty() {
         let ret = executor
             .batch_decode(
                 &workset.iter().map(|i| reqids[*i]).collect::<Vec<_>>(),
             )
             .await?;
+        steps += 1;
 
         let mut new_workset = Vec::new();
         for ((new_token, finish), idx) in ret
@@ -100,8 +103,16 @@ pub async fn debug_executor_main(
             .zip(workset.iter())
         {
             output_ids[*idx].push(*new_token);
-            if *finish == comm::FinishReason::NotFinished {
-                new_workset.push(*idx);
+            let cancel = *idx == 1 && steps == 50;
+            if cancel {
+                executor.cancel_request(reqids[*idx]).await?;
+                info!(idx, reqid = %reqids[*idx], "Request cancelled.");
+            }
+            let should_print = if *finish == comm::FinishReason::NotFinished {
+                if !cancel {
+                    new_workset.push(*idx);
+                }
+                false
             } else {
                 info!(
                     idx,
@@ -109,6 +120,9 @@ pub async fn debug_executor_main(
                     finish_reason = ?finish,
                     "Request finished."
                 );
+                true
+            };
+            if should_print || cancel {
                 let text = tokenizer.decode(&output_ids[*idx])?;
                 println!("{}", text);
             }
