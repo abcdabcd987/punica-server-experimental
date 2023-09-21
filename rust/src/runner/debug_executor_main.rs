@@ -54,7 +54,7 @@ pub async fn debug_executor_main(
 
     let mut reqids = Vec::new();
     let mut output_ids = Vec::new();
-    for question in &questions {
+    for (idx, question) in questions.iter().enumerate() {
         let prompt = template.replace("{prompt}", question);
         let input_ids = tokenizer.encode(&prompt)?;
         output_ids.push(input_ids);
@@ -66,8 +66,8 @@ pub async fn debug_executor_main(
                 output_ids.last().unwrap(),
                 &comm::GenerationConfig {
                     min_tokens: 0,
-                    max_tokens: 500,
-                    max_new_tokens: 1024,
+                    max_tokens: 2048,
+                    max_new_tokens: 2048,
                     stop_token_id: tokenizer.eos_id(),
                     temperature: 0.7,
                     repetition_penalty: 1.1,
@@ -75,7 +75,7 @@ pub async fn debug_executor_main(
                 },
             )
             .await?;
-        info!(reqid=%reqid, "Added request.");
+        info!(idx, %reqid, "Added request.");
     }
 
     let ret = executor.batch_prefill(&reqids).await?;
@@ -93,13 +93,23 @@ pub async fn debug_executor_main(
             .await?;
 
         let mut new_workset = Vec::new();
-        for i in workset {
-            output_ids[i].push(ret.token_ids[i]);
-            if ret.finish_reasons[i] == comm::FinishReason::NotFinished {
-                new_workset.push(i);
+        for ((new_token, finish), idx) in ret
+            .token_ids
+            .iter()
+            .zip(ret.finish_reasons.iter())
+            .zip(workset.iter())
+        {
+            output_ids[*idx].push(*new_token);
+            if *finish == comm::FinishReason::NotFinished {
+                new_workset.push(*idx);
             } else {
-                info!(idx=%i, reason=?ret.finish_reasons[i], "Request finished.");
-                let text = tokenizer.decode(&output_ids[i])?;
+                info!(
+                    idx,
+                    reqid = %reqids[*idx],
+                    finish_reason = ?finish,
+                    "Request finished."
+                );
+                let text = tokenizer.decode(&output_ids[*idx])?;
                 println!("{}", text);
             }
         }

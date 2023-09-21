@@ -194,8 +194,8 @@ class GpuExecutor:
     token_ids = []
     finish_reasons = []
     for i in range(len(reqs)):
-      next_token_id = reqctx.textgen.get_next_token_id(
-          logits.cat[i].unsqueeze(0))
+      reqctx = self.reqctx[reqs[i]]
+      next_token_id = reqctx.textgen.get_next_token_id(logits.cat[i:i + 1])
       reqctx.textgen.append_token(next_token_id)
       finish = reqctx.textgen.is_finish()
       token_ids.append(next_token_id)
