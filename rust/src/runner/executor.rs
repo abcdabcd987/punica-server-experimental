@@ -1,9 +1,14 @@
+use std::collections::HashSet;
 use std::process::Stdio;
+use std::sync::Arc;
 
+use itertools::izip;
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::process::{Child, ChildStdin, ChildStdout, Command};
+use tokio::sync::{mpsc, Mutex, Notify};
+use tokio::task::JoinHandle;
 use uuid::Uuid;
 
 use crate::comm;
@@ -59,12 +64,12 @@ pub struct TextGenerationChunkResponse {
     pub finish_reasons: Vec<comm::FinishReason>,
 }
 
-pub struct GpuExecutor {
+pub struct ExecutorSubprocess {
     stdin: ChildStdin,
     stdout: ChildStdout,
 }
 
-impl GpuExecutor {
+impl ExecutorSubprocess {
     pub fn spawn(gpu_uuid: Uuid) -> anyhow::Result<(Child, Self)> {
         let mut child = Command::new("python")
             .args(["-m", "punica_runner.gpu_executor"])
@@ -171,5 +176,274 @@ impl GpuExecutor {
         let batch_decode = Request::BatchDecode(BatchDecode { reqids });
         self.write_msg(&batch_decode).await?;
         self.read_msg().await
+    }
+}
+
+struct UnfinishedRequests {
+    cancel: HashSet<Uuid>,
+    prefill: Vec<(Uuid, Vec<u32>, comm::GenerationConfig)>,
+    decode: Vec<Uuid>,
+}
+
+pub struct GpuExecutor {
+    unfinished: Arc<Mutex<UnfinishedRequests>>,
+    state: State,
+}
+
+enum State {
+    Invalid,
+    Spawned(SpawnedState),
+    Running(BackToBackScheduleHandle),
+}
+
+struct SpawnedState {
+    subprocess: ExecutorSubprocess,
+    tx: mpsc::UnboundedSender<comm::TextGenChunk>,
+}
+
+struct BackToBackScheduleHandle {
+    notify_new_task: Arc<Notify>,
+    notify_shutdown: Arc<Notify>,
+    join: JoinHandle<()>,
+}
+
+struct BackToBackSchedule {
+    new_task: Arc<Notify>,
+    shutdown: Arc<Notify>,
+    subprocess: ExecutorSubprocess,
+    unfinished: Arc<Mutex<UnfinishedRequests>>,
+    tx: mpsc::UnboundedSender<comm::TextGenChunk>,
+}
+
+impl GpuExecutor {
+    pub fn spawn(
+        gpu_uuid: Uuid,
+    ) -> anyhow::Result<(
+        Child,
+        mpsc::UnboundedReceiver<comm::TextGenChunk>,
+        Self,
+    )> {
+        let (child, subprocess) = ExecutorSubprocess::spawn(gpu_uuid)?;
+        let unfinished = Arc::new(Mutex::new(UnfinishedRequests {
+            cancel: HashSet::new(),
+            prefill: Vec::new(),
+            decode: Vec::new(),
+        }));
+        let (tx, rx) = mpsc::unbounded_channel();
+        let state = State::Spawned(SpawnedState { subprocess, tx });
+
+        Ok((child, rx, Self { unfinished, state }))
+    }
+
+    fn unwrap_spawned_mut(&mut self) -> &mut SpawnedState {
+        match &mut self.state {
+            State::Spawned(s) => s,
+            _ => panic!("Not in the Spawned state"),
+        }
+    }
+
+    fn unwrap_bh_mut(&mut self) -> &mut BackToBackScheduleHandle {
+        match &mut self.state {
+            State::Running(bh) => bh,
+            _ => panic!("Not in the Running state"),
+        }
+    }
+
+    fn start_back_to_back_schedule(&mut self) {
+        let state = std::mem::replace(&mut self.state, State::Invalid);
+        match state {
+            State::Spawned(SpawnedState { subprocess, tx }) => {
+                let notify_new_task = Arc::new(Notify::new());
+                let notify_shutdown = Arc::new(Notify::new());
+                let mut b = BackToBackSchedule {
+                    new_task: notify_new_task.clone(),
+                    shutdown: notify_shutdown.clone(),
+                    subprocess,
+                    unfinished: self.unfinished.clone(),
+                    tx,
+                };
+                let join = tokio::spawn(async move { b.run().await });
+                let bh = BackToBackScheduleHandle {
+                    notify_new_task,
+                    notify_shutdown,
+                    join,
+                };
+                self.state = State::Running(bh);
+            }
+            _ => panic!("Bad state"),
+        };
+    }
+
+    pub async fn init(
+        &mut self,
+        model_path: &str,
+        dtype_str: &str,
+        block_len: u32,
+        kvpool_capacity: u32,
+    ) -> anyhow::Result<()> {
+        self.unwrap_spawned_mut()
+            .subprocess
+            .init(model_path, dtype_str, block_len, kvpool_capacity)
+            .await?;
+        self.start_back_to_back_schedule();
+        Ok(())
+    }
+
+    pub async fn init_fake(&mut self) -> anyhow::Result<()> {
+        self.unwrap_spawned_mut().subprocess.init_fake().await?;
+        self.start_back_to_back_schedule();
+        Ok(())
+    }
+
+    pub async fn shutdown(&mut self) {
+        let state = std::mem::replace(&mut self.state, State::Invalid);
+        match state {
+            State::Running(bh) => {
+                bh.notify_shutdown.notify_one();
+                bh.join.await.unwrap();
+            }
+            _ => panic!("Bad state"),
+        }
+    }
+
+    pub async fn add_request(
+        &mut self,
+        reqid: Uuid,
+        input_ids: Vec<u32>,
+        gencfg: comm::GenerationConfig,
+    ) {
+        self.unfinished.lock().await.prefill.push((reqid, input_ids, gencfg));
+        self.unwrap_bh_mut().notify_new_task.notify_one();
+    }
+
+    pub async fn cancel_request(&mut self, reqid: Uuid) {
+        self.unfinished.lock().await.cancel.insert(reqid);
+        self.unwrap_bh_mut().notify_new_task.notify_one();
+    }
+}
+
+impl BackToBackSchedule {
+    async fn run(&mut self) {
+        loop {
+            match self.process_unfinished().await {
+                Err(_) => break,
+                Ok(true) => continue,
+                Ok(false) => {
+                    tokio::select! {
+                        _ = self.new_task.notified() => continue,
+                        _ = self.shutdown.notified() => {
+                            self.subprocess.shutdown().await.unwrap();
+                            break;
+                        },
+                    }
+                }
+            }
+        }
+    }
+
+    async fn process_unfinished(&mut self) -> anyhow::Result<bool> {
+        enum Task {
+            Cancel(HashSet<Uuid>),
+            Prefill(Vec<(Uuid, Vec<u32>, comm::GenerationConfig)>),
+            Decode(Vec<Uuid>),
+            None,
+        }
+        let task = {
+            let mut unfinished = self.unfinished.lock().await;
+            if !unfinished.cancel.is_empty() {
+                Task::Cancel(unfinished.cancel.drain().collect())
+            } else if !unfinished.prefill.is_empty() {
+                Task::Prefill(unfinished.prefill.drain(..).collect())
+            } else if !unfinished.decode.is_empty() {
+                Task::Decode(unfinished.decode.drain(..).collect())
+            } else {
+                Task::None
+            }
+        };
+        match task {
+            Task::Cancel(cancel) => {
+                self.process_unfinished_cancel(cancel).await?;
+            }
+            Task::Prefill(prefill) => {
+                self.process_unfinished_prefill(prefill).await?;
+            }
+            Task::Decode(decode) => {
+                self.process_unfinished_decode(decode).await?;
+            }
+            Task::None => return Ok(false),
+        }
+        Ok(true)
+    }
+
+    async fn process_unfinished_cancel(
+        &mut self,
+        mut cancel: HashSet<Uuid>,
+    ) -> anyhow::Result<()> {
+        {
+            let mut unfinished = self.unfinished.lock().await;
+            let mut i = 0usize;
+            while i < unfinished.prefill.len() && !cancel.is_empty() {
+                let reqid = unfinished.prefill[i].0;
+                if cancel.contains(&reqid) {
+                    unfinished.prefill.swap_remove(i);
+                    cancel.remove(&reqid);
+                } else {
+                    i += 1;
+                }
+            }
+        }
+
+        for reqid in &cancel {
+            self.subprocess.cancel_request(*reqid).await?;
+        }
+        let mut unfinished = self.unfinished.lock().await;
+        unfinished.decode.retain(|reqid| !cancel.contains(reqid));
+        Ok(())
+    }
+
+    async fn process_unfinished_prefill(
+        &mut self,
+        prefill: Vec<(Uuid, Vec<u32>, comm::GenerationConfig)>,
+    ) -> anyhow::Result<()> {
+        let mut reqids = Vec::with_capacity(prefill.len());
+        for (reqid, input_ids, gencfg) in &prefill {
+            self.subprocess.add_request(*reqid, input_ids, gencfg).await?;
+            reqids.push(*reqid);
+        }
+        let res = self.subprocess.batch_prefill(&reqids).await?;
+        let mut remain = self.process_chunks(reqids, res)?;
+        self.unfinished.lock().await.decode.append(&mut remain);
+        Ok(())
+    }
+
+    async fn process_unfinished_decode(
+        &mut self,
+        decode: Vec<Uuid>,
+    ) -> anyhow::Result<()> {
+        let res = self.subprocess.batch_decode(&decode).await?;
+        let mut remain = self.process_chunks(decode, res)?;
+        self.unfinished.lock().await.decode.append(&mut remain);
+        Ok(())
+    }
+
+    fn process_chunks(
+        &self,
+        reqs: Vec<Uuid>,
+        res: TextGenerationChunkResponse,
+    ) -> anyhow::Result<Vec<Uuid>> {
+        let mut remain = Vec::with_capacity(reqs.len());
+        for (reqid, token_id, finish) in
+            izip!(reqs, res.token_ids, res.finish_reasons)
+        {
+            if finish == comm::FinishReason::NotFinished {
+                remain.push(reqid);
+            }
+            self.tx.send(comm::TextGenChunk {
+                request_id: reqid,
+                token_id,
+                finish_reason: finish,
+            })?;
+        }
+        Ok(remain)
     }
 }

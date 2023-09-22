@@ -11,7 +11,9 @@ chrono = "0.4.26"
 clap = { version = "4.3.23", features = ["derive"] }
 dashmap = "5.5.3"
 futures = "0.3.28"
+itertools = "0.11.0"
 log = "0.4.20"
+parking_lot = "0.12.1"
 postcard = { version = "1.0.6", features = ["use-std"] }
 pyo3 = { version = "0.19.2", features = ["auto-initialize"] }
 rmp-serde = "1.1.2"

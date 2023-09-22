@@ -143,7 +143,12 @@ impl Scheduler {
             runner
                 .send_message(
                     &comm::SchedulerToRunnerMessage::AcquireGpuCommand(
-                        comm::AcquireGpuCommand { gpu_uuid: *uuid },
+                        comm::AcquireGpuCommand {
+                            gpu_uuid: *uuid,
+                            dtype: "".to_string(),
+                            block_len: 0,
+                            kvpool_capacity: 0,
+                        },
                     ),
                 )
                 .await;

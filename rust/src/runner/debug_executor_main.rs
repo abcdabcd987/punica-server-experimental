@@ -3,7 +3,7 @@ use std::path::PathBuf;
 use uuid::Uuid;
 
 use super::device_query::device_query;
-use super::executor::GpuExecutor;
+use super::executor::ExecutorSubprocess;
 use super::tokenizer::Tokenizer;
 use crate::comm;
 
@@ -38,7 +38,7 @@ pub async fn debug_executor_main(
 
     let tokenizer = Tokenizer::new(&args.model_path)?;
     info!("Tokenizer loaded.");
-    let (mut child, mut executor) = GpuExecutor::spawn(gpu_uuid)?;
+    let (mut child, mut executor) = ExecutorSubprocess::spawn(gpu_uuid)?;
     let wait_executor = tokio::spawn(async move {
         let ec = child.wait().await.unwrap();
         match ec.success() {

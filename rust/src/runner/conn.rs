@@ -11,7 +11,7 @@ use tokio_tungstenite::{MaybeTlsStream, WebSocketStream};
 use tokio_util::sync::CancellationToken;
 use url::Url;
 
-use super::Runner;
+use super::runner::Runner;
 use crate::utils::get_ws_peer_addr;
 
 pub type WebSocket = WebSocketStream<MaybeTlsStream<TcpStream>>;
@@ -21,7 +21,6 @@ pub struct SchedulerConnection {
     addr: SocketAddr,
     ws_send: SplitSink<WebSocket, Message>,
     ws_recv: SplitStream<WebSocket>,
-    pub ch_send: mpsc::Sender<Message>,
     ch_recv: mpsc::Receiver<Message>,
     shutdown: CancellationToken,
     _shutdown_complete: mpsc::Sender<()>,
@@ -32,19 +31,18 @@ impl SchedulerConnection {
     pub fn new(
         url: Url,
         ws: WebSocket,
+        ch_recv: mpsc::Receiver<Message>,
         shutdown: CancellationToken,
         shutdown_complete: mpsc::Sender<()>,
         runner: Arc<Runner>,
     ) -> Self {
         let addr = get_ws_peer_addr(&ws);
         let (ws_send, ws_recv) = ws.split();
-        let (ch_send, ch_recv) = mpsc::channel(32);
         Self {
             url,
             addr,
             ws_send,
             ws_recv,
-            ch_send,
             ch_recv,
             shutdown,
             _shutdown_complete: shutdown_complete,
@@ -54,7 +52,9 @@ impl SchedulerConnection {
 
     pub async fn serve(mut self) {
         match self.run().await {
-            Ok(()) => info!(url=%self.url, addr=%self.addr, "Connection closed."),
+            Ok(()) => {
+                info!(url=%self.url, addr=%self.addr, "Connection closed.")
+            }
             Err(e) => {
                 error!(url=%self.url, addr=%self.addr, cause=%e, "Connection error. Connection closed.");
             }

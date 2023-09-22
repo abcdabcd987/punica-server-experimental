@@ -28,8 +28,8 @@ pub struct GenerationConfig {
 #[derive(Serialize, Deserialize, Debug)]
 pub struct TextGenRequest {
     pub request_id: Uuid,
-    pub prompt: String,
-    pub params: GenerationConfig,
+    pub input_ids: Vec<u32>,
+    pub gencfg: GenerationConfig,
 }
 
 #[derive(Serialize_repr, Deserialize_repr, Debug, PartialEq, Eq)]
@@ -41,16 +41,10 @@ pub enum FinishReason {
 }
 
 #[derive(Serialize, Deserialize, Debug)]
-pub struct ChoiceChunk {
-    pub index: u32,
-    pub text: String,
-    pub finish_reason: FinishReason,
-}
-
-#[derive(Serialize, Deserialize, Debug)]
 pub struct TextGenChunk {
     pub request_id: Uuid,
-    pub choices: Vec<ChoiceChunk>,
+    pub token_id: u32,
+    pub finish_reason: FinishReason,
 }
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -79,7 +73,7 @@ pub enum SchedulerToRunnerMessage {
     AcquireGpuCommand(AcquireGpuCommand),
     ReleaseGpuCommand(ReleaseGpuCommand),
 
-    TextGenRequest(TextGenRequest),
+    RunTextGenCommand(RunTextGenCommand),
     CancelTextGen(CancelTextGen),
 }
 
@@ -107,6 +101,9 @@ pub struct RunnerExitCommand {}
 #[derive(Serialize, Deserialize, Debug)]
 pub struct AcquireGpuCommand {
     pub gpu_uuid: Uuid,
+    pub dtype: String,
+    pub block_len: u32,
+    pub kvpool_capacity: u32,
 }
 #[derive(Serialize, Deserialize, Debug)]
 pub struct AcquireGpuResponse {
@@ -119,6 +116,14 @@ pub struct ReleaseGpuCommand {
 #[derive(Serialize, Deserialize, Debug)]
 pub struct ReleaseGpuResponse {
     pub gpu_uuid: Uuid,
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+pub struct RunTextGenCommand {
+    pub gpu_uuid: Uuid,
+    pub request_id: Uuid,
+    pub input_ids: Vec<u32>,
+    pub gencfg: GenerationConfig,
 }
 
 #[derive(Serialize, Deserialize, Debug)]
