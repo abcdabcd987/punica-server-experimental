@@ -37,6 +37,7 @@ impl SchedulerConnection {
         runner: Arc<Runner>,
     ) -> Self {
         let addr = get_ws_peer_addr(&ws);
+        info!(url=%url, addr=%addr, "Connected to scheduler.");
         let (ws_send, ws_recv) = ws.split();
         Self {
             url,

@@ -1,32 +1,10 @@
 use std::collections::{BTreeSet, HashMap, HashSet};
-use std::net::SocketAddr;
 
 use uuid::Uuid;
 
+use super::traits::{RequestStub, RunnerStub};
 use crate::comm;
 use crate::model_config::LlamaModelConfig;
-
-pub trait RunnerStub {
-    // Properties
-    fn id(&self) -> Uuid;
-    fn device_props(&self) -> &[comm::CudaDeviceProp];
-    fn addr(&self) -> SocketAddr;
-
-    // Commands
-    fn init_gpu(&self, msg: comm::AcquireGpuCommand);
-    fn run_textgen(&self, msg: comm::RunTextGenCommand);
-    fn cancel_textgen(&self, msg: comm::CancelTextGen);
-}
-
-pub trait RequestStub {
-    // Properties
-    fn id(&self) -> Uuid;
-    fn input_ids(&self) -> &[u32];
-    fn generation_config(&self) -> &comm::GenerationConfig;
-
-    // Commands
-    fn add_chunk(&self, token_id: u32, finish: comm::FinishReason);
-}
 
 pub struct Scheduler<R: RunnerStub, Q: RequestStub> {
     model_config: LlamaModelConfig,
@@ -95,7 +73,8 @@ impl<R: RunnerStub, Q: RequestStub> Scheduler<R, Q> {
             let block_size =
                 self.model_config.token_kvcache_size() * block_len * sizeof;
             let kvpool_capacity = mem / block_size as i64;
-            let max_batch_size = kvpool_capacity / 2048;
+            let maxlen = 2048;
+            let max_batch_size = kvpool_capacity / (maxlen / block_len) as i64;
             if max_batch_size <= 0 {
                 error!(gpu_uuid=%prop.uuid, gpu_name=%prop.name, gpu_total_memory=%prop.total_memory, "Not enough memory. Skip.");
                 self.gpus.insert(
