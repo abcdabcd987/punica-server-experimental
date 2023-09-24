@@ -32,12 +32,15 @@ pub struct TextGenRequest {
     pub gencfg: GenerationConfig,
 }
 
-#[derive(Serialize_repr, Deserialize_repr, Debug, PartialEq, Eq)]
+#[derive(
+    Serialize_repr, Deserialize_repr, Debug, PartialEq, Eq, Clone, Copy,
+)]
 #[repr(u8)]
 pub enum FinishReason {
     NotFinished = 0,
     Stop = 1,
     Length = 2,
+    Error = 3,
 }
 
 #[derive(Serialize, Deserialize, Debug)]
