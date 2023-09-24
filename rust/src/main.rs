@@ -2,6 +2,7 @@
 extern crate tracing;
 
 mod comm;
+mod model_config;
 mod runner;
 mod scheduler;
 mod utils;

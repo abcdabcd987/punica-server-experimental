@@ -219,7 +219,7 @@ impl Connection {
             M::ReleaseGpuResponse(_) => todo!(),
             M::RunnerMigrateToNewSchedulerCommand(_) => todo!(),
             M::RunnerMigratedToNewScheduler(_) => todo!(),
-            M::TextGenChunk(_) => todo!(),
+            M::BatchedTextGenChunk(_) => todo!(),
             M::UpdateGpuStatsRequest(_) => todo!(),
         }
 

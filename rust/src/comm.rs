@@ -11,7 +11,7 @@ pub enum NodeType {
     Scheduler,
 }
 
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct GenerationConfig {
     pub min_tokens: u32,
     pub max_tokens: u32,
@@ -63,7 +63,7 @@ pub enum RunnerToSchedulerMessage {
     RunnerMigrateToNewSchedulerCommand(RunnerMigrateToNewSchedulerCommand),
     RunnerMigratedToNewScheduler(RunnerMigratedToNewScheduler),
 
-    TextGenChunk(TextGenChunk),
+    BatchedTextGenChunk(BatchedTextGenChunk),
     UpdateGpuStatsRequest(UpdateGpuStatsRequest),
 }
 
@@ -124,6 +124,11 @@ pub struct RunTextGenCommand {
     pub request_id: Uuid,
     pub input_ids: Vec<u32>,
     pub gencfg: GenerationConfig,
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+pub struct BatchedTextGenChunk {
+    pub chunks: Vec<TextGenChunk>,
 }
 
 #[derive(Serialize, Deserialize, Debug)]

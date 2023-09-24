@@ -1,4 +1,7 @@
 mod server;
+mod traits;
+#[allow(clippy::module_inception)]
+mod scheduler;
 
 use std::collections::HashSet;
 use std::net::SocketAddr;
