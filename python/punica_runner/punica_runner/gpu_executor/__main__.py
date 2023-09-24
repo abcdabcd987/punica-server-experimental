@@ -87,6 +87,8 @@ def main_wrapper():
   except Exception as e:
     write_msg({"Err": "".join(traceback.format_exception(e))})
     raise e
+  except KeyboardInterrupt:
+    return
 
 
 if __name__ == "__main__":

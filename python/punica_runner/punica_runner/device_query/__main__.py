@@ -4,27 +4,39 @@ from uuid import UUID
 
 import msgpack
 import pynvml
+import torch.cuda
+
+
+def get_cuda_uuids() -> list[UUID]:
+  from ctypes import byref
+  from ctypes import c_int
+  from ctypes import CDLL
+  from ctypes import create_string_buffer
+  cudart = CDLL("libcudart.so")
+  cnt = c_int()
+  assert cudart.cudaGetDeviceCount(byref(cnt)) == 0
+  prop = create_string_buffer(1024)
+  ret = []
+  for i in range(cnt.value):
+    assert cudart.cudaGetDeviceProperties(byref(prop), i) == 0
+    ret.append(UUID(bytes=prop.raw[256:272]))
+  return ret
 
 
 def get_all_gpu_info():
-  pynvml.nvmlInit()
-  cnt = pynvml.nvmlDeviceGetCount()
+  uuids = get_cuda_uuids()
+
   gpu_info_list = []
-  for i in range(cnt):
-    handle = pynvml.nvmlDeviceGetHandleByIndex(i)
-    meminfo = pynvml.nvmlDeviceGetMemoryInfo(handle)
-    uuid = pynvml.nvmlDeviceGetUUID(handle).removeprefix("GPU-")
-    name = pynvml.nvmlDeviceGetName(handle)
-    sm_major, sm_minor = pynvml.nvmlDeviceGetCudaComputeCapability(handle)
+  for i, uuid in enumerate(uuids):
+    prop = torch.cuda.get_device_properties(i)
     gpu_info_list.append(
         dict(
-            uuid=UUID(uuid).bytes,
-            name=name,
-            total_memory=meminfo.total,
-            sm_major=sm_major,
-            sm_minor=sm_minor,
+            uuid=uuid.bytes,
+            name=prop.name,
+            total_memory=prop.total_memory,
+            sm_major=prop.major,
+            sm_minor=prop.minor,
         ))
-  pynvml.nvmlShutdown()
   return gpu_info_list
 
 
