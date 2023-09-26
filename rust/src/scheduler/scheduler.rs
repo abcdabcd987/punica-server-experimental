@@ -176,9 +176,11 @@ impl<R: RunnerStub, Q: RequestStub> Scheduler<R, Q> {
         }
         runner.run_textgen(comm::RunTextGenCommand {
             gpu_uuid,
-            request_id,
-            input_ids: request.input_ids().to_vec(),
-            gencfg: request.generation_config().clone(),
+            req: comm::TextGenRequest {
+                request_id,
+                input_ids: request.input_ids().to_vec(),
+                gencfg: request.generation_config().clone(),
+            },
         });
         let len = request.input_ids().len() as u32;
         self.requests

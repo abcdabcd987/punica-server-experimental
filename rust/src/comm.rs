@@ -7,7 +7,7 @@ use uuid::Uuid;
 #[derive(Serialize, Deserialize, Debug)]
 pub enum NodeType {
     Runner,
-    ApiServer,
+    Frontend,
     Scheduler,
 }
 
@@ -124,9 +124,7 @@ pub struct ReleaseGpuResponse {
 #[derive(Serialize, Deserialize, Debug)]
 pub struct RunTextGenCommand {
     pub gpu_uuid: Uuid,
-    pub request_id: Uuid,
-    pub input_ids: Vec<u32>,
-    pub gencfg: GenerationConfig,
+    pub req: TextGenRequest,
 }
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -149,57 +147,15 @@ pub struct RunnerMigrateToNewSchedulerCommand {
 #[derive(Serialize, Deserialize, Debug)]
 pub struct RunnerMigratedToNewScheduler {}
 
-//====== ApiServer ======
+//====== Frontend ======
 
 #[derive(Serialize, Deserialize, Debug)]
-pub enum ApiServerToSchedulerMessage {
-    AddApiServerRequest(AddApiServerRequest),
-    DelApiServerRequest(DelApiServerRequest),
-    ApiServerMigratedToNewScheduler(ApiServerMigratedToNewScheduler),
-
+pub enum FrontendToSchedulerMessage {
     TextGenRequest(TextGenRequest),
     CancelTextGen(CancelTextGen),
 }
 
 #[derive(Serialize, Deserialize, Debug)]
-pub enum SchedulerToApiServerMessage {
-    ApiServerExitCommand(ApiServerExitCommand),
-    ApiServerMigrateToNewSchedulerCommand(
-        ApiServerMigrateToNewSchedulerCommand,
-    ),
-
+pub enum SchedulerToFrontendMessage {
     TextGenChunk(TextGenChunk),
 }
-
-#[derive(Serialize, Deserialize, Debug)]
-pub struct AddApiServerRequest {
-    pub api_server_id: Uuid,
-}
-
-#[derive(Serialize, Deserialize, Debug)]
-pub struct DelApiServerRequest {}
-
-#[derive(Serialize, Deserialize, Debug)]
-pub struct ApiServerExitCommand {}
-
-#[derive(Serialize, Deserialize, Debug)]
-pub struct ApiServerMigrateToNewSchedulerCommand {
-    pub new_host: String,
-}
-
-#[derive(Serialize, Deserialize, Debug)]
-pub struct ApiServerMigratedToNewScheduler {}
-
-//====== Scheduler ======
-
-#[derive(Serialize, Deserialize, Debug)]
-pub enum SchedulerToSchedulerMessage {
-    SchedulerTakeOverRequest(SchedulerTakeOverRequest),
-    SchedulerTakeOverResponse(SchedulerTakeOverResponse),
-}
-
-#[derive(Serialize, Deserialize, Debug)]
-pub struct SchedulerTakeOverRequest {}
-
-#[derive(Serialize, Deserialize, Debug)]
-pub struct SchedulerTakeOverResponse {}

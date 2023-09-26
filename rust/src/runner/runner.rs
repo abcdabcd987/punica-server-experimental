@@ -113,7 +113,7 @@ impl Runner {
     ) -> anyhow::Result<()> {
         let mut gpu = self.gpus.get_mut(&msg.gpu_uuid).unwrap();
         gpu.executor
-            .add_request(msg.request_id, msg.input_ids, msg.gencfg)
+            .add_request(msg.req.request_id, msg.req.input_ids, msg.req.gencfg)
             .await;
 
         Ok(())

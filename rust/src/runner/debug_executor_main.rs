@@ -4,8 +4,8 @@ use uuid::Uuid;
 
 use super::device_query::device_query;
 use super::executor::ExecutorSubprocess;
-use super::tokenizer::Tokenizer;
 use crate::comm;
+use crate::tokenizer::Tokenizer;
 
 #[derive(Debug, clap::Args)]
 pub struct DebugExecutorArgs {

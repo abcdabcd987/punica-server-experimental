@@ -2,9 +2,11 @@
 extern crate tracing;
 
 mod comm;
+mod frontend;
 mod model_config;
 mod runner;
 mod scheduler;
+mod tokenizer;
 mod utils;
 
 use clap::Parser;
