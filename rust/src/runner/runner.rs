@@ -10,6 +10,7 @@ use crate::comm;
 
 struct Gpu {
     devprop: comm::CudaDeviceProp,
+    rx: Option<mpsc::UnboundedReceiver<comm::TextGenChunk>>,
     executor: GpuExecutor,
 }
 
@@ -27,13 +28,17 @@ impl Runner {
         model_path: PathBuf,
         use_fake_executor: bool,
         devprops: Vec<comm::CudaDeviceProp>,
-        gpu_executors: Vec<GpuExecutor>,
+        gpu_executors: Vec<(
+            mpsc::UnboundedReceiver<comm::TextGenChunk>,
+            GpuExecutor,
+        )>,
         scheduler_tx: mpsc::Sender<Message>,
     ) -> anyhow::Result<Self> {
         let uuid = Uuid::now_v7();
         let gpus = DashMap::new();
-        for (devprop, executor) in devprops.into_iter().zip(gpu_executors) {
-            gpus.insert(devprop.uuid, Gpu { devprop, executor });
+        for (devprop, (rx, executor)) in devprops.into_iter().zip(gpu_executors)
+        {
+            gpus.insert(devprop.uuid, Gpu { devprop, rx: Some(rx), executor });
         }
         Ok(Self { model_path, use_fake_executor, uuid, gpus, scheduler_tx })
     }
@@ -75,6 +80,21 @@ impl Runner {
                 )
                 .await?;
         }
+
+        let mut gpu_rx = gpu.rx.take().unwrap();
+        let scheduler_tx = self.scheduler_tx.clone();
+        tokio::spawn(async move {
+            while let Some(chunk) = gpu_rx.recv().await {
+                let msg = comm::RunnerToSchedulerMessage::BatchedTextGenChunk(
+                    comm::BatchedTextGenChunk { chunks: vec![chunk] },
+                );
+                scheduler_tx
+                    .send(Message::Binary(postcard::to_stdvec(&msg).unwrap()))
+                    .await
+                    .unwrap();
+            }
+        });
+
         self.send_message(&comm::RunnerToSchedulerMessage::AcquireGpuResponse(
             comm::AcquireGpuResponse { gpu_uuid: msg.gpu_uuid },
         ))
@@ -119,15 +139,21 @@ impl Runner {
         Ok(())
     }
 
+    pub async fn cancel_textgen(
+        &self,
+        msg: &comm::CancelTextGenCommand,
+    ) -> anyhow::Result<()> {
+        let mut gpu = self.gpus.get_mut(&msg.gpu_uuid).unwrap();
+        gpu.executor.cancel_request(msg.request_id).await;
+        Ok(())
+    }
+
     pub async fn handle_scheduler_message(
         &self,
         msg: comm::SchedulerToRunnerMessage,
     ) -> anyhow::Result<()> {
         use comm::SchedulerToRunnerMessage::*;
         match msg {
-            RunnerExitCommand(msg) => {
-                error!(?msg, "TODO: handle_scheduler_message");
-            }
             AcquireGpuCommand(msg) => {
                 self.acquire_gpu(&msg).await?;
             }
@@ -138,7 +164,7 @@ impl Runner {
                 self.run_textgen(msg).await?;
             }
             CancelTextGen(msg) => {
-                error!(?msg, "TODO: handle_scheduler_message");
+                self.cancel_textgen(&msg).await?;
             }
         }
         Ok(())

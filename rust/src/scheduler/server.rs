@@ -48,7 +48,7 @@ impl RunnerStub for RunnerDelegate {
         self.send(comm::SchedulerToRunnerMessage::RunTextGenCommand(msg));
     }
 
-    fn cancel_textgen(&self, msg: comm::CancelTextGen) {
+    fn cancel_textgen(&self, msg: comm::CancelTextGenCommand) {
         self.send(comm::SchedulerToRunnerMessage::CancelTextGen(msg));
     }
 }
@@ -65,6 +65,7 @@ pub struct Request {
     id: Uuid,
     input_ids: Vec<u32>,
     generation_config: comm::GenerationConfig,
+    tx: mpsc::UnboundedSender<Message>,
 }
 
 impl RequestStub for Request {
@@ -81,7 +82,16 @@ impl RequestStub for Request {
     }
 
     fn add_chunk(&self, token_id: u32, finish: comm::FinishReason) {
-        todo!();
+        let msg = comm::SchedulerToFrontendMessage::TextGenChunk(
+            comm::TextGenChunk {
+                request_id: self.id,
+                token_id,
+                finish_reason: finish,
+            },
+        );
+        let m = postcard::to_allocvec(&msg).unwrap();
+        let msg = Message::Binary(m);
+        self.tx.send(msg).unwrap();
     }
 }
 
@@ -136,8 +146,7 @@ async fn ws_handler(
         "runner" => {
             ConnectionType::Runner(RunnerConnection { runner_id: None })
         }
-        "apisrv" => ConnectionType::ApiServer,
-        "scheduler" => ConnectionType::Scheduler,
+        "frontend" => ConnectionType::Frontend,
         _ => {
             return (axum::http::StatusCode::BAD_REQUEST, "Bad node type")
                 .into_response();
@@ -164,16 +173,14 @@ async fn handle_socket(
 
 enum ConnectionType {
     Runner(RunnerConnection),
-    ApiServer,
-    Scheduler,
+    Frontend,
 }
 
 impl ConnectionType {
     pub fn type_name(&self) -> &'static str {
         match self {
             ConnectionType::Runner(_) => "runner",
-            ConnectionType::ApiServer => "apisrv",
-            ConnectionType::Scheduler => "scheduler",
+            ConnectionType::Frontend => "frontend",
         }
     }
 }
@@ -273,11 +280,13 @@ impl Connection {
             Some(Ok(Message::Binary(m))) => {
                 match &self.conn_type {
                     ConnectionType::Runner(_) => {
-                        self.handle_runner_message(postcard::from_bytes(&m)?)
-                            .await?;
+                        self.handle_runner_message(postcard::from_bytes(&m)?)?;
                     }
-                    ConnectionType::ApiServer => todo!(),
-                    ConnectionType::Scheduler => todo!(),
+                    ConnectionType::Frontend => {
+                        self.handle_frontend_message(postcard::from_bytes(
+                            &m,
+                        )?)?;
+                    }
                 }
                 Ok(ControlFlow::Continue(()))
             }
@@ -297,13 +306,13 @@ impl Connection {
         }
     }
 
-    async fn handle_runner_message(
+    fn handle_runner_message(
         &mut self,
         msg: comm::RunnerToSchedulerMessage,
     ) -> anyhow::Result<()> {
-        use comm::RunnerToSchedulerMessage as M;
+        use comm::RunnerToSchedulerMessage::*;
         match msg {
-            M::AddRunnerRequest(m) => {
+            AddRunnerRequest(m) => {
                 let state = match &mut self.conn_type {
                     ConnectionType::Runner(state) => state,
                     _ => unreachable!(),
@@ -318,17 +327,36 @@ impl Connection {
                 };
                 self.scheduler.lock().unwrap().add_runner(runner);
             }
-            M::DelRunnerRequest(_) => todo!(),
-            M::AcquireGpuResponse(m) => {
+            AcquireGpuResponse(m) => {
                 self.scheduler.lock().unwrap().notify_gpu_initialized(&m);
             }
-            M::ReleaseGpuResponse(_) => todo!(),
-            M::RunnerMigrateToNewSchedulerCommand(_) => todo!(),
-            M::RunnerMigratedToNewScheduler(_) => todo!(),
-            M::BatchedTextGenChunk(m) => {
+            ReleaseGpuResponse(_) => todo!(),
+            BatchedTextGenChunk(m) => {
                 self.scheduler.lock().unwrap().notify_textgen_chunk(&m);
             }
-            M::UpdateGpuStatsRequest(_) => todo!(),
+        }
+
+        Ok(())
+    }
+
+    fn handle_frontend_message(
+        &mut self,
+        msg: comm::FrontendToSchedulerMessage,
+    ) -> anyhow::Result<()> {
+        use comm::FrontendToSchedulerMessage::*;
+        match msg {
+            TextGenRequest(m) => {
+                let req = Request {
+                    id: m.request_id,
+                    input_ids: m.input_ids,
+                    generation_config: m.gencfg,
+                    tx: self.ch_send.clone(),
+                };
+                self.scheduler.lock().unwrap().add_textgen(req);
+            }
+            CancelTextGen(m) => {
+                self.scheduler.lock().unwrap().cancel_textgen(&m);
+            }
         }
 
         Ok(())

@@ -1,3 +1,5 @@
+#![allow(dead_code)]
+
 #[derive(Debug, Clone)]
 pub struct LlamaModelConfig {
     pub num_layers: u32,

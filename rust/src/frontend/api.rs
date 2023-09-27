@@ -1,5 +1,4 @@
 use serde::{Deserialize, Serialize};
-use uuid::Uuid;
 
 #[derive(Serialize, Debug)]
 pub struct Error {
@@ -9,6 +8,7 @@ pub struct Error {
 #[derive(Deserialize, Debug)]
 pub struct TextGenRequest {
     pub prompt: String,
+    pub template: Option<String>,
 
     pub min_tokens: Option<u32>,
     pub max_tokens: Option<u32>,
@@ -31,7 +31,7 @@ pub enum FinishReason {
 
 #[derive(Serialize, Debug)]
 pub struct TextGenChunk {
-    pub id: Uuid,
     pub text: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub finish_reason: Option<FinishReason>,
 }

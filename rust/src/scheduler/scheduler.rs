@@ -68,7 +68,7 @@ impl<R: RunnerStub, Q: RequestStub> Scheduler<R, Q> {
 
             let sizeof = 2;
             let block_len = 16;
-            let mut mem = (prop.total_memory as f32 * 0.9) as i64;
+            let mut mem = (prop.total_memory as f32 * 0.8) as i64;
             mem -= (self.model_config.total_params() * sizeof) as i64;
             let block_size =
                 self.model_config.token_kvcache_size() * block_len * sizeof;
@@ -227,6 +227,12 @@ impl<R: RunnerStub, Q: RequestStub> Scheduler<R, Q> {
         };
         let gpu = self.gpus.get_mut(&reqctx.gpu_uuid).unwrap();
         let gpu_state = gpu.state.unwrap_running_mut();
+
+        let runner = self.runners.get(&gpu.runner_id).unwrap();
+        runner.cancel_textgen(comm::CancelTextGenCommand {
+            gpu_uuid: gpu.gpu_uuid,
+            request_id: msg.request_id,
+        });
 
         let found = self
             .gpus_accepting_new_requests

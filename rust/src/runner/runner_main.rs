@@ -40,7 +40,7 @@ pub async fn runner_main(args: RunnerArgs) -> anyhow::Result<()> {
         let gpu_uuid = devprop.uuid;
         let (mut child, rx, executor) = GpuExecutor::spawn(gpu_uuid)?;
         wait_executors.spawn(async move { (gpu_uuid, child.wait().await) });
-        gpu_executors.push(executor);
+        gpu_executors.push((rx, executor));
     }
 
     let (ch_send, ch_recv) = mpsc::channel(32);

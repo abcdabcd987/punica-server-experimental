@@ -8,7 +8,6 @@ use axum::response::IntoResponse;
 use axum::routing::post;
 use axum::{Json, Router};
 use tokio::sync::mpsc;
-use tokio_util::sync::CancellationToken;
 use tower::ServiceBuilder;
 use tower_http::trace::{DefaultMakeSpan, TraceLayer};
 use tower_http::ServiceBuilderExt;
@@ -20,8 +19,6 @@ use crate::comm;
 use crate::tokenizer::Tokenizer;
 
 struct HttpServerContext {
-    shutdown: CancellationToken,
-    shutdown_complete: mpsc::Sender<()>,
     scheduler: SchedulerClient,
     tokenizer: Tokenizer,
 }
@@ -29,8 +26,7 @@ struct HttpServerContext {
 pub async fn run_http(
     bind: SocketAddr,
     http_handle: axum_server::Handle,
-    shutdown: CancellationToken,
-    shutdown_complete: mpsc::Sender<()>,
+    _shutdown_complete: mpsc::Sender<()>,
     scheduler: SchedulerClient,
     tokenizer: Tokenizer,
 ) {
@@ -38,12 +34,7 @@ pub async fn run_http(
         TraceLayer::new_for_http()
             .make_span_with(DefaultMakeSpan::default().include_headers(true)),
     );
-    let ctx = Arc::new(HttpServerContext {
-        shutdown,
-        shutdown_complete,
-        scheduler,
-        tokenizer,
-    });
+    let ctx = Arc::new(HttpServerContext { scheduler, tokenizer });
     let app = Router::new()
         .route("/textgen", post(textgen_handler))
         .layer(service)
@@ -75,7 +66,11 @@ async fn textgen_handler(
         repetition_penalty: req.repetition_penalty.unwrap_or(1.1),
         top_p: req.top_p.unwrap_or(0.9),
     };
-    let input_ids = match ctx.tokenizer.encode(&req.prompt) {
+    const TEMPLATE: &str = "[INST] <<SYS>> You are a helpful, respectful and honest assistant. <</SYS>>\n{prompt} [/INST]\n";
+    let template = req.template.as_deref().unwrap_or(TEMPLATE);
+    let prompt = template.replace("{prompt}", &req.prompt);
+
+    let input_ids = match ctx.tokenizer.encode(&prompt) {
         Ok(v) => v,
         Err(e) => {
             error!(cause=%e, "Failed to encode prompt");
@@ -90,7 +85,8 @@ async fn textgen_handler(
     };
     let (tx, mut rx) = mpsc::unbounded_channel();
     let mut output_ids = input_ids.clone();
-    let mut last_output_len = ctx.tokenizer.decode(&output_ids).unwrap().len();
+    let mut prefix_offset = 0;
+    let mut read_offset = input_ids.len();
     ctx.scheduler.add_textgen(reqid, input_ids, gencfg, tx);
 
     struct DisconnectGuard {
@@ -108,50 +104,47 @@ async fn textgen_handler(
     }
 
     let stream = async_stream::stream! {
-        let mut guard = DisconnectGuard {
-            scheduler: ctx.scheduler.clone(),
-            reqid,
-            finished: false,
+    let mut guard = DisconnectGuard {
+        scheduler: ctx.scheduler.clone(),
+        reqid,
+        finished: false,
+    };
+
+    while let Some(chunk) = rx.recv().await {
+        let finish_reason = match chunk.finish_reason {
+            comm::FinishReason::NotFinished => None,
+            comm::FinishReason::Stop => Some(api::FinishReason::Stop),
+            comm::FinishReason::Length => Some(api::FinishReason::Length),
+            comm::FinishReason::Error => Some(api::FinishReason::Error),
         };
 
-        while let Some(chunk) = rx.recv().await {
-            let finish_reason = match chunk.finish_reason {
-                comm::FinishReason::NotFinished => None,
-                comm::FinishReason::Stop => Some(api::FinishReason::Stop),
-                comm::FinishReason::Length => Some(api::FinishReason::Length),
-                comm::FinishReason::Error => Some(api::FinishReason::Error),
-            };
-
-            output_ids.push(chunk.token_id);
-            let output = ctx.tokenizer.decode(&output_ids);
-            match output {
-                Ok(output) => {
-                    let output_len = output.len();
-                    let text = output[last_output_len..].to_owned();
-                    last_output_len = output_len;
-                    yield Event::default().json_data(api::TextGenChunk {
-                        id: reqid,
-                        text,
-                        finish_reason,
-                    });
-                }
-                Err(_) => {
-                    if finish_reason.is_some() {
-                        yield Event::default().json_data(api::TextGenChunk {
-                            id: reqid,
-                            text: "".to_owned(),
-                            finish_reason,
-                        });
-                    }
-                    // If not valid UTF-8, wait for the next token.
-                }
-            }
-
-            if finish_reason.is_some() {
-                break;
+        output_ids.push(chunk.token_id);
+        let prefix_text =
+            ctx.tokenizer.decode(&output_ids[prefix_offset..read_offset]);
+        let new_text = ctx.tokenizer.decode(&output_ids[prefix_offset..]);
+        let mut ok = false;
+        if let (Ok(prefix_text), Ok(new_text)) = (prefix_text, new_text) {
+            if new_text.len() > prefix_text.len() {
+                ok = true;
+                let text = new_text[prefix_text.len()..].to_owned();
+                prefix_offset = read_offset;
+                read_offset = output_ids.len();
+                yield Event::default()
+                    .json_data(api::TextGenChunk { text, finish_reason });
             }
         }
-        guard.finished = true;
+        if !ok && finish_reason.is_some() {
+            yield Event::default().json_data(api::TextGenChunk {
+                text: "".to_owned(),
+                finish_reason,
+            });
+        }
+
+        if finish_reason.is_some() {
+            break;
+        }
+    }
+    guard.finished = true;
     };
 
     Sse::new(stream).keep_alive(KeepAlive::default()).into_response()

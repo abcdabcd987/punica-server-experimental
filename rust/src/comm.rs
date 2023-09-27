@@ -50,34 +50,24 @@ pub struct TextGenChunk {
     pub finish_reason: FinishReason,
 }
 
-#[derive(Serialize, Deserialize, Debug)]
-pub struct CancelTextGen {
-    pub request_id: Uuid,
-}
-
 //====== Runner ======
 
 #[derive(Serialize, Deserialize, Debug)]
 pub enum RunnerToSchedulerMessage {
     AddRunnerRequest(AddRunnerRequest),
-    DelRunnerRequest(DelRunnerRequest),
     AcquireGpuResponse(AcquireGpuResponse),
     ReleaseGpuResponse(ReleaseGpuResponse),
-    RunnerMigrateToNewSchedulerCommand(RunnerMigrateToNewSchedulerCommand),
-    RunnerMigratedToNewScheduler(RunnerMigratedToNewScheduler),
 
     BatchedTextGenChunk(BatchedTextGenChunk),
-    UpdateGpuStatsRequest(UpdateGpuStatsRequest),
 }
 
 #[derive(Serialize, Deserialize, Debug)]
 pub enum SchedulerToRunnerMessage {
-    RunnerExitCommand(RunnerExitCommand),
     AcquireGpuCommand(AcquireGpuCommand),
     ReleaseGpuCommand(ReleaseGpuCommand),
 
     RunTextGenCommand(RunTextGenCommand),
-    CancelTextGen(CancelTextGen),
+    CancelTextGen(CancelTextGenCommand),
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -94,12 +84,6 @@ pub struct AddRunnerRequest {
     pub runner_id: Uuid,
     pub devices: Vec<CudaDeviceProp>,
 }
-
-#[derive(Serialize, Deserialize, Debug)]
-pub struct DelRunnerRequest {}
-
-#[derive(Serialize, Deserialize, Debug)]
-pub struct RunnerExitCommand {}
 
 #[derive(Serialize, Deserialize, Debug)]
 pub struct AcquireGpuCommand {
@@ -128,24 +112,15 @@ pub struct RunTextGenCommand {
 }
 
 #[derive(Serialize, Deserialize, Debug)]
+pub struct CancelTextGenCommand {
+    pub gpu_uuid: Uuid,
+    pub request_id: Uuid,
+}
+
+#[derive(Serialize, Deserialize, Debug)]
 pub struct BatchedTextGenChunk {
     pub chunks: Vec<TextGenChunk>,
 }
-
-#[derive(Serialize, Deserialize, Debug)]
-pub struct UpdateGpuStatsRequest {
-    pub gpu_uuid: Uuid,
-    pub batch_size: u32,
-    pub memory_used: u64,
-}
-
-#[derive(Serialize, Deserialize, Debug)]
-pub struct RunnerMigrateToNewSchedulerCommand {
-    pub new_host: String,
-}
-
-#[derive(Serialize, Deserialize, Debug)]
-pub struct RunnerMigratedToNewScheduler {}
 
 //====== Frontend ======
 
@@ -158,4 +133,9 @@ pub enum FrontendToSchedulerMessage {
 #[derive(Serialize, Deserialize, Debug)]
 pub enum SchedulerToFrontendMessage {
     TextGenChunk(TextGenChunk),
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+pub struct CancelTextGen {
+    pub request_id: Uuid,
 }

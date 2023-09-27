@@ -13,7 +13,7 @@ pub trait RunnerStub {
     // Commands
     fn init_gpu(&self, msg: comm::AcquireGpuCommand);
     fn run_textgen(&self, msg: comm::RunTextGenCommand);
-    fn cancel_textgen(&self, msg: comm::CancelTextGen);
+    fn cancel_textgen(&self, msg: comm::CancelTextGenCommand);
 }
 
 pub trait RequestStub {
