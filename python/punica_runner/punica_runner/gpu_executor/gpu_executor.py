@@ -1,5 +1,6 @@
 import dataclasses
 import enum
+import gc
 import uuid
 from typing import TypedDict
 
@@ -133,6 +134,7 @@ class GpuExecutor:
         device=self.device,
     )
     self.reqctx: dict[uuid.UUID, RequestContext] = {}
+    self._cnt_decode = 0
 
   def add_request(
       self,
@@ -178,6 +180,11 @@ class GpuExecutor:
     }
 
   def batch_decode(self, reqs: list[uuid.UUID]) -> TextGenerationChunkResponse:
+    self._cnt_decode += 1
+    if self._cnt_decode % 16 == 0:
+      gc.collect()
+      torch.cuda.empty_cache()
+
     input_ids = []
     kv = []
     for reqid in reqs:

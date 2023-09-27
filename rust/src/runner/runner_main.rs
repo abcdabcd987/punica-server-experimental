@@ -6,6 +6,7 @@ use tokio::sync::mpsc;
 use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
 use url::Url;
+use uuid::Uuid;
 
 use super::conn::SchedulerConnection;
 use super::device_query::device_query;
@@ -72,6 +73,13 @@ pub async fn runner_main(args: RunnerArgs) -> anyhow::Result<()> {
             info!("Ctrl-C received.");
             Ok(())
         }
+        res = wait_executors.join_next() => {
+            if let Some(res) = res {
+                let (gpu_uuid, res) = res.unwrap();
+                handle_executor_join(gpu_uuid, res);
+            }
+            Ok(())
+        }
     };
     if let Err(e) = ret {
         error!(%e);
@@ -82,22 +90,29 @@ pub async fn runner_main(args: RunnerArgs) -> anyhow::Result<()> {
     ct.cancel();
     while let Some(res) = wait_executors.join_next().await {
         let (gpu_uuid, res) = res.unwrap();
-        match res.map(|s| s.code()) {
-            Ok(Some(0)) => {
-                info!(gpu_uuid=%gpu_uuid, "GpuExecutor exited normally.")
-            }
-            Ok(Some(ec)) => {
-                error!(gpu_uuid=%gpu_uuid, exit_code=%ec, "GpuExecutor exited with error.")
-            }
-            Ok(None) => {
-                error!(gpu_uuid=%gpu_uuid, "GpuExecutor exited by signal.")
-            }
-            Err(e) => {
-                error!(gpu_uuid=%gpu_uuid, cause=%e, "GpuExecutor exited with error.")
-            }
-        }
+        handle_executor_join(gpu_uuid, res);
     }
     let _ = shutdown_complete_rx.recv().await;
     info!("Shutdown complete.");
     Ok(())
+}
+
+fn handle_executor_join(
+    gpu_uuid: Uuid,
+    res: Result<std::process::ExitStatus, std::io::Error>,
+) {
+    match res.map(|s| s.code()) {
+        Ok(Some(0)) => {
+            info!(gpu_uuid=%gpu_uuid, "GpuExecutor exited normally.")
+        }
+        Ok(Some(ec)) => {
+            error!(gpu_uuid=%gpu_uuid, exit_code=%ec, "GpuExecutor exited with error.")
+        }
+        Ok(None) => {
+            error!(gpu_uuid=%gpu_uuid, "GpuExecutor exited by signal.")
+        }
+        Err(e) => {
+            error!(gpu_uuid=%gpu_uuid, cause=%e, "GpuExecutor exited with error.")
+        }
+    }
 }

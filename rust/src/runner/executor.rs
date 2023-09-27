@@ -99,7 +99,10 @@ impl ExecutorSubprocess {
         let res: Result<T, String> = rmp_serde::from_slice(&buf)?;
         match res {
             Ok(res) => Ok(res),
-            Err(err) => Err(anyhow::anyhow!(err)),
+            Err(err) => {
+                error!(%err, "Python subprocess returned an error.");
+                Err(anyhow::anyhow!(err))
+            }
         }
     }
 
