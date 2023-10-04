@@ -1,2 +1,0 @@
-nvidia-ml-py
-torch>=2.0

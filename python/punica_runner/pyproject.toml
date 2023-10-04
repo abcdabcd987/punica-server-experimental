@@ -1,0 +1,4 @@
+[project]
+name = "punica_runner"
+version = "0.0.0"
+dependencies = ["msgpack", "nvidia-ml-py", "numpy", "torch>=2.0"]
