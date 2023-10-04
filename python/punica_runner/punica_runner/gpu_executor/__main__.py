@@ -1,3 +1,14 @@
+import logging
+
+try:
+  logging.disable()
+  from deepspeed.utils.logging import logger
+  logger.handlers.clear()
+except ImportError:
+  pass
+
+logging.disable(logging.NOTSET)
+
 import os
 import struct
 import sys
