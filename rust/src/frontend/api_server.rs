@@ -14,8 +14,8 @@ use tower_http::ServiceBuilderExt;
 use uuid::Uuid;
 
 use super::api;
-use super::scheduler_client::SchedulerClient;
 use crate::comm;
+use crate::scheduler_client::SchedulerClient;
 use crate::tokenizer::Tokenizer;
 
 struct HttpServerContext {

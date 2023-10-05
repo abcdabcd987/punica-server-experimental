@@ -7,7 +7,7 @@ use tokio_util::sync::CancellationToken;
 use url::Url;
 
 use super::api_server;
-use super::scheduler_client::SchedulerConnection;
+use crate::scheduler_client::SchedulerConnection;
 use crate::tokenizer::Tokenizer;
 
 #[derive(Debug, clap::Args)]

@@ -43,7 +43,7 @@ pub enum FinishReason {
     Error = 3,
 }
 
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct TextGenChunk {
     pub request_id: Uuid,
     pub token_id: u32,

@@ -3,9 +3,11 @@ extern crate tracing;
 
 mod comm;
 mod frontend;
+mod loadgen;
 mod model_config;
 mod runner;
 mod scheduler;
+mod scheduler_client;
 mod tokenizer;
 mod utils;
 
@@ -24,6 +26,7 @@ enum Commands {
     Scheduler(scheduler::SchedulerArgs),
     Runner(runner::RunnerArgs),
     Frontend(frontend::FrontendArgs),
+    Loadgen(loadgen::LoadGenArgs),
     DebugExecutor(runner::DebugExecutorArgs),
 }
 
@@ -39,7 +42,8 @@ fn main() -> anyhow::Result<()> {
                 .compact()
                 .with_file(true)
                 .with_line_number(true)
-                .with_target(false),
+                .with_target(false)
+                .with_writer(std::io::stderr),
         )
         .init();
 
@@ -48,6 +52,7 @@ fn main() -> anyhow::Result<()> {
             Commands::Scheduler(args) => scheduler::scheduler_main(args).await,
             Commands::Runner(args) => runner::runner_main(args).await,
             Commands::Frontend(args) => frontend::frontend_main(args).await,
+            Commands::Loadgen(args) => loadgen::loadgen_main(args).await,
             Commands::DebugExecutor(args) => {
                 runner::debug_executor_main(args).await
             }

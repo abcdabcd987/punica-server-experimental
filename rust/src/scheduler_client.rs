@@ -173,7 +173,11 @@ impl SchedulerConnection {
                         return;
                     }
                 };
-                ctx.chunk_tx.send(msg).unwrap();
+                ctx.chunk_tx.send(msg.clone()).unwrap();
+                drop(ctx);
+                if msg.finish_reason != comm::FinishReason::NotFinished {
+                    self.requests.remove(&msg.request_id);
+                }
             }
         }
     }

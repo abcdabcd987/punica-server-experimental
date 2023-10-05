@@ -403,7 +403,11 @@ impl BackToBackSchedule {
         let mut unfinished = self.unfinished.lock().await;
 
         if unfinished.step.len() != res.request_ids.len() {
-            panic!("Inconsistent state between parent and Python child process. Differnt number of requests. Parent={}, Subprocess={}", unfinished.step.len(), res.request_ids.len());
+            panic!(
+                "Inconsistent state between parent and Python child process. Differnt number of requests. Parent={}, Subprocess={}",
+                unfinished.step.len(),
+                res.request_ids.len()
+            );
         }
 
         let mut remain = Vec::with_capacity(unfinished.step.len());
