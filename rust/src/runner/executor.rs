@@ -20,8 +20,7 @@ enum Request<'a> {
     Shutdown(Shutdown),
     AddRequest(AddRequest<'a>),
     CancelRequest(CancelRequest),
-    BatchPrefill(BatchPrefill<'a>),
-    BatchDecode(BatchDecode<'a>),
+    Step {},
 }
 
 #[derive(Serialize, Debug)]
@@ -48,18 +47,9 @@ struct CancelRequest {
     reqid: Uuid,
 }
 
-#[derive(Serialize, Debug)]
-struct BatchPrefill<'a> {
-    reqids: &'a [Uuid],
-}
-
-#[derive(Serialize, Debug)]
-struct BatchDecode<'a> {
-    reqids: &'a [Uuid],
-}
-
 #[derive(Deserialize, Debug)]
 pub struct TextGenerationChunkResponse {
+    pub request_ids: Vec<Uuid>,
     pub token_ids: Vec<u32>,
     pub finish_reasons: Vec<comm::FinishReason>,
 }
@@ -163,29 +153,19 @@ impl ExecutorSubprocess {
         Ok(())
     }
 
-    pub async fn batch_prefill(
+    pub async fn step(
         &mut self,
-        reqids: &[Uuid],
     ) -> anyhow::Result<TextGenerationChunkResponse> {
-        let batch_prefill = Request::BatchPrefill(BatchPrefill { reqids });
-        self.write_msg(&batch_prefill).await?;
-        self.read_msg().await
-    }
-
-    pub async fn batch_decode(
-        &mut self,
-        reqids: &[Uuid],
-    ) -> anyhow::Result<TextGenerationChunkResponse> {
-        let batch_decode = Request::BatchDecode(BatchDecode { reqids });
-        self.write_msg(&batch_decode).await?;
+        let step = Request::Step {};
+        self.write_msg(&step).await?;
         self.read_msg().await
     }
 }
 
 struct UnfinishedRequests {
     cancel: HashSet<Uuid>,
-    prefill: Vec<(Uuid, Vec<u32>, comm::GenerationConfig)>,
-    decode: Vec<Uuid>,
+    enqueue: Vec<(Uuid, Vec<u32>, comm::GenerationConfig)>,
+    step: Vec<Uuid>,
 }
 
 pub struct GpuExecutor {
@@ -229,8 +209,8 @@ impl GpuExecutor {
         let (child, subprocess) = ExecutorSubprocess::spawn(gpu_uuid)?;
         let unfinished = Arc::new(Mutex::new(UnfinishedRequests {
             cancel: HashSet::new(),
-            prefill: Vec::new(),
-            decode: Vec::new(),
+            enqueue: Vec::new(),
+            step: Vec::new(),
         }));
         let (tx, rx) = mpsc::unbounded_channel();
         let state = State::Spawned(SpawnedState { subprocess, tx });
@@ -315,7 +295,7 @@ impl GpuExecutor {
         input_ids: Vec<u32>,
         gencfg: comm::GenerationConfig,
     ) {
-        self.unfinished.lock().await.prefill.push((reqid, input_ids, gencfg));
+        self.unfinished.lock().await.enqueue.push((reqid, input_ids, gencfg));
         self.unwrap_bh_mut().notify_new_task.notify_one();
     }
 
@@ -347,18 +327,18 @@ impl BackToBackSchedule {
     async fn process_unfinished(&mut self) -> anyhow::Result<bool> {
         enum Task {
             Cancel(HashSet<Uuid>),
-            Prefill(Vec<(Uuid, Vec<u32>, comm::GenerationConfig)>),
-            Decode(Vec<Uuid>),
+            Enqueue(Vec<(Uuid, Vec<u32>, comm::GenerationConfig)>),
+            Step,
             None,
         }
         let task = {
             let mut unfinished = self.unfinished.lock().await;
             if !unfinished.cancel.is_empty() {
                 Task::Cancel(unfinished.cancel.drain().collect())
-            } else if !unfinished.prefill.is_empty() {
-                Task::Prefill(unfinished.prefill.drain(..).collect())
-            } else if !unfinished.decode.is_empty() {
-                Task::Decode(unfinished.decode.drain(..).collect())
+            } else if !unfinished.enqueue.is_empty() {
+                Task::Enqueue(unfinished.enqueue.drain(..).collect())
+            } else if !unfinished.step.is_empty() {
+                Task::Step
             } else {
                 Task::None
             }
@@ -367,11 +347,11 @@ impl BackToBackSchedule {
             Task::Cancel(cancel) => {
                 self.process_unfinished_cancel(cancel).await?;
             }
-            Task::Prefill(prefill) => {
-                self.process_unfinished_prefill(prefill).await?;
+            Task::Enqueue(enqueue) => {
+                self.process_unfinished_enqueue(enqueue).await?;
             }
-            Task::Decode(decode) => {
-                self.process_unfinished_decode(decode).await?;
+            Task::Step => {
+                self.process_unfinished_step().await?;
             }
             Task::None => return Ok(false),
         }
@@ -385,10 +365,10 @@ impl BackToBackSchedule {
         {
             let mut unfinished = self.unfinished.lock().await;
             let mut i = 0usize;
-            while i < unfinished.prefill.len() && !cancel.is_empty() {
-                let reqid = unfinished.prefill[i].0;
+            while i < unfinished.enqueue.len() && !cancel.is_empty() {
+                let reqid = unfinished.enqueue[i].0;
                 if cancel.contains(&reqid) {
-                    unfinished.prefill.swap_remove(i);
+                    unfinished.enqueue.swap_remove(i);
                     cancel.remove(&reqid);
                 } else {
                     i += 1;
@@ -400,43 +380,35 @@ impl BackToBackSchedule {
             self.subprocess.cancel_request(*reqid).await?;
         }
         let mut unfinished = self.unfinished.lock().await;
-        unfinished.decode.retain(|reqid| !cancel.contains(reqid));
+        unfinished.step.retain(|reqid| !cancel.contains(reqid));
         Ok(())
     }
 
-    async fn process_unfinished_prefill(
+    async fn process_unfinished_enqueue(
         &mut self,
-        prefill: Vec<(Uuid, Vec<u32>, comm::GenerationConfig)>,
+        enqueue: Vec<(Uuid, Vec<u32>, comm::GenerationConfig)>,
     ) -> anyhow::Result<()> {
-        let mut reqids = Vec::with_capacity(prefill.len());
-        for (reqid, input_ids, gencfg) in &prefill {
+        let mut reqids = Vec::with_capacity(enqueue.len());
+        for (reqid, input_ids, gencfg) in &enqueue {
             self.subprocess.add_request(*reqid, input_ids, gencfg).await?;
             reqids.push(*reqid);
         }
-        let res = self.subprocess.batch_prefill(&reqids).await?;
-        let mut remain = self.process_chunks(reqids, res)?;
-        self.unfinished.lock().await.decode.append(&mut remain);
+        self.unfinished.lock().await.step.append(&mut reqids);
         Ok(())
     }
 
-    async fn process_unfinished_decode(
-        &mut self,
-        decode: Vec<Uuid>,
-    ) -> anyhow::Result<()> {
-        let res = self.subprocess.batch_decode(&decode).await?;
-        let mut remain = self.process_chunks(decode, res)?;
-        self.unfinished.lock().await.decode.append(&mut remain);
-        Ok(())
-    }
+    async fn process_unfinished_step(&mut self) -> anyhow::Result<()> {
+        let res: TextGenerationChunkResponse = self.subprocess.step().await?;
 
-    fn process_chunks(
-        &self,
-        reqs: Vec<Uuid>,
-        res: TextGenerationChunkResponse,
-    ) -> anyhow::Result<Vec<Uuid>> {
-        let mut remain = Vec::with_capacity(reqs.len());
+        let mut unfinished = self.unfinished.lock().await;
+
+        if unfinished.step.len() != res.request_ids.len() {
+            panic!("Inconsistent state between parent and Python child process. Differnt number of requests. Parent={}, Subprocess={}", unfinished.step.len(), res.request_ids.len());
+        }
+
+        let mut remain = Vec::with_capacity(unfinished.step.len());
         for (reqid, token_id, finish) in
-            izip!(reqs, res.token_ids, res.finish_reasons)
+            izip!(res.request_ids, res.token_ids, res.finish_reasons)
         {
             if finish == comm::FinishReason::NotFinished {
                 remain.push(reqid);
@@ -447,6 +419,8 @@ impl BackToBackSchedule {
                 finish_reason: finish,
             })?;
         }
-        Ok(remain)
+        unfinished.step = remain;
+
+        Ok(())
     }
 }

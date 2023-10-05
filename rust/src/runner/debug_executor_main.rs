@@ -90,20 +90,10 @@ pub async fn debug_executor_main(
         info!(idx, %reqid, "Added request.");
     }
 
-    let ret = executor.batch_prefill(&reqids).await?;
-    for (o, r) in output_ids.iter_mut().zip(ret.token_ids) {
-        o.push(r);
-    }
-    info!("batch_prefill done.");
-
     let mut workset: Vec<_> = (0..questions.len()).collect();
     let mut steps = 0;
     while !workset.is_empty() {
-        let ret = executor
-            .batch_decode(
-                &workset.iter().map(|i| reqids[*i]).collect::<Vec<_>>(),
-            )
-            .await?;
+        let ret = executor.step().await?;
         steps += 1;
 
         let mut new_workset = Vec::new();

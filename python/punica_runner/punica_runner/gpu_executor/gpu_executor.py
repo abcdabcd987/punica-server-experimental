@@ -7,7 +7,7 @@ from typing import TypedDict
 import numpy as np
 from punica.models.llama import LlamaForCausalLM
 from punica.utils import BatchedKvCache
-from punica.utils import CatTensor
+from punica.utils import BatchLenInfo
 from punica.utils import KvCache
 from punica.utils import KvPool
 import torch
@@ -35,6 +35,7 @@ class FinishReason(enum.Enum):
 
 # Sync with `GenerationContextChunk` in rust/src/runner/executor.rs.
 class TextGenerationChunkResponse(TypedDict):
+  request_ids: list[bytes]
   token_ids: list[int]
   finish_reasons: list[int]
 
@@ -68,9 +69,9 @@ class GenerationContext:
         t = torch.as_tensor([self.output_ids], device=logits.device)
       else:
         t = None
-      last_token_logits = self.logits_processor(t, logits[-1].unsqueeze(0))[0]
+      last_token_logits = self.logits_processor(t, logits.unsqueeze(0))[0]
     else:
-      last_token_logits = logits[-1, :]
+      last_token_logits = logits
 
     if self.gencfg["temperature"] <= 0 or self.gencfg["top_p"] <= 0:
       _, indices = torch.topk(last_token_logits, 2)
@@ -134,7 +135,7 @@ class GpuExecutor:
         device=self.device,
     )
     self.reqctx: dict[uuid.UUID, RequestContext] = {}
-    self._cnt_decode = 0
+    self._cnt_step = 0
 
   def add_request(
       self,
@@ -153,21 +154,45 @@ class GpuExecutor:
   def cancel_request(self, reqid: uuid.UUID):
     self._del_request(reqid)
 
-  def batch_prefill(self, reqs: list[uuid.UUID]) -> TextGenerationChunkResponse:
-    # NOTE: Waiting for FlashInfer to add batch_prefill.
-    #       Use for loop for now.
-    token_ids = []
-    finish_reasons = []
-    for reqid in reqs:
+  def step(self) -> TextGenerationChunkResponse:
+    self._cnt_step += 1
+    if self._cnt_step % 16 == 0:
+      gc.collect()
+      torch.cuda.empty_cache()
+
+    prefill_input_ids, prefill_lens, prefill_kv, prefill_reqids = [], [], [], []
+    decode_input_ids, decode_kv, decode_reqids = [], [], []
+    for reqctx in self.reqctx.values():
+      if len(reqctx.textgen.output_ids) == reqctx.textgen.prompt_len:
+        prefill_input_ids.extend(reqctx.textgen.output_ids)
+        prefill_lens.append(len(reqctx.textgen.output_ids))
+        prefill_kv.append(reqctx.kvcache)
+        prefill_reqids.append(reqctx.reqid)
+      else:
+        decode_input_ids.append(reqctx.textgen.output_ids[-1])
+        decode_kv.append(reqctx.kvcache)
+        decode_reqids.append(reqctx.reqid)
+        reqctx.kvcache.acquire_one()
+
+    input_ids = torch.tensor(
+        prefill_input_ids + decode_input_ids,
+        dtype=torch.long,
+        device=self.device)
+    blen = BatchLenInfo(prefill_lens, len(decode_input_ids), self.device)
+    prefill_kv = BatchedKvCache(prefill_kv) if prefill_kv else None
+    decode_kv = BatchedKvCache(decode_kv) if decode_kv else None
+    logits, _ = self.model(input_ids, blen, prefill_kv, decode_kv)
+    if prefill_kv:
+      if decode_kv:
+        logits = torch.cat([logits[blen.indptr[1:] - 1], logits[blen.doff:]])
+      else:
+        logits = logits[blen.indptr[1:] - 1]
+
+    request_ids = prefill_reqids + decode_reqids
+    token_ids, finish_reasons = [], []
+    for i, reqid in enumerate(request_ids):
       reqctx = self.reqctx[reqid]
-      input_ids = torch.tensor(
-          reqctx.textgen.output_ids, dtype=torch.long, device=self.device)
-      logits, _ = self.model(
-          input_ids=CatTensor(input_ids, [reqctx.textgen.prompt_len]),
-          kv=BatchedKvCache([reqctx.kvcache]),
-          is_decode=False,
-      )
-      next_token_id = reqctx.textgen.get_next_token_id(logits.cat)
+      next_token_id = reqctx.textgen.get_next_token_id(logits[i])
       reqctx.textgen.append_token(next_token_id)
       finish = reqctx.textgen.is_finish()
       token_ids.append(next_token_id)
@@ -175,42 +200,7 @@ class GpuExecutor:
       if finish != FinishReason.NotFinished:
         self._del_request(reqid)
     return {
-        "token_ids": token_ids,
-        "finish_reasons": finish_reasons,
-    }
-
-  def batch_decode(self, reqs: list[uuid.UUID]) -> TextGenerationChunkResponse:
-    self._cnt_decode += 1
-    if self._cnt_decode % 16 == 0:
-      gc.collect()
-      torch.cuda.empty_cache()
-
-    input_ids = []
-    kv = []
-    for reqid in reqs:
-      reqctx = self.reqctx[reqid]
-      reqctx.kvcache.acquire_one()
-      input_ids.append(reqctx.textgen.output_ids[-1])
-      kv.append(reqctx.kvcache)
-    input_ids = torch.tensor(input_ids, dtype=torch.long, device=self.device)
-    logits, _ = self.model(
-        input_ids=CatTensor(input_ids, [1] * len(reqs)),
-        kv=BatchedKvCache(kv),
-        is_decode=True,
-    )
-
-    token_ids = []
-    finish_reasons = []
-    for i in range(len(reqs)):
-      reqctx = self.reqctx[reqs[i]]
-      next_token_id = reqctx.textgen.get_next_token_id(logits.cat[i:i + 1])
-      reqctx.textgen.append_token(next_token_id)
-      finish = reqctx.textgen.is_finish()
-      token_ids.append(next_token_id)
-      finish_reasons.append(finish.value)
-      if finish != FinishReason.NotFinished:
-        self._del_request(reqs[i])
-    return {
+        "request_ids": [x.bytes for x in request_ids],
         "token_ids": token_ids,
         "finish_reasons": finish_reasons,
     }
@@ -239,12 +229,10 @@ class FakeGpuExecutor:
   def cancel_request(self, reqid: uuid.UUID):
     self._del_request(reqid)
 
-  def _fake_batch_generate(
-      self, reqs: list[uuid.UUID]) -> TextGenerationChunkResponse:
+  def step(self) -> TextGenerationChunkResponse:
     token_ids = []
     finish_reasons = []
-    for reqid in reqs:
-      reqctx = self._reqctx[reqid]
+    for reqid, reqctx in self._reqctx.items():
       if reqctx["rng"].random() < 0.1:
         next_token_id = reqctx["gencfg"]["stop_token_id"]
         finish = FinishReason.Stop
@@ -259,9 +247,3 @@ class FakeGpuExecutor:
         "token_ids": token_ids,
         "finish_reasons": finish_reasons,
     }
-
-  def batch_prefill(self, reqs: list[uuid.UUID]) -> TextGenerationChunkResponse:
-    return self._fake_batch_generate(reqs)
-
-  def batch_decode(self, reqs: list[uuid.UUID]) -> TextGenerationChunkResponse:
-    return self._fake_batch_generate(reqs)

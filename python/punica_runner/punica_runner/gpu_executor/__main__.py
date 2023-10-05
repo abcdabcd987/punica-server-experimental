@@ -66,12 +66,8 @@ def handle_cancel_request(msg):
   return 0
 
 
-def handle_batch_prefill(msg):
-  return exe.batch_prefill([uuid.UUID(bytes=x) for x in msg["reqids"]])
-
-
-def handle_batch_decode(msg):
-  return exe.batch_decode([uuid.UUID(bytes=x) for x in msg["reqids"]])
+def handle_step(_msg):
+  return exe.step()
 
 
 def do_main():
@@ -79,8 +75,7 @@ def do_main():
       "Init": handle_init,
       "AddRequest": handle_add_request,
       "CancelRequest": handle_cancel_request,
-      "BatchPrefill": handle_batch_prefill,
-      "BatchDecode": handle_batch_decode,
+      "Step": handle_step,
   }
   while True:
     msg = read_msg()
