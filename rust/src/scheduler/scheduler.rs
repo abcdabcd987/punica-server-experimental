@@ -10,6 +10,7 @@ pub struct Scheduler<R: RunnerStub, Q: RequestStub> {
     model_config: LlamaModelConfig,
     runners: HashMap<Uuid, R>,
     gpus: HashMap<Uuid, GpuContext>,
+    frontends: HashMap<Uuid, FrontendContext>,
     requests: HashMap<Uuid, RequestContext<Q>>,
 
     /// (batch_size, gpu_uuid)
@@ -41,12 +42,17 @@ struct RequestContext<Q: RequestStub> {
     len: u32,
 }
 
+struct FrontendContext {
+    request_ids: HashSet<Uuid>,
+}
+
 impl<R: RunnerStub, Q: RequestStub> Scheduler<R, Q> {
     pub fn new(model_config: LlamaModelConfig) -> Self {
         Self {
             model_config,
             runners: HashMap::new(),
             gpus: HashMap::new(),
+            frontends: HashMap::new(),
             requests: HashMap::new(),
             gpus_accepting_new_requests: BTreeSet::new(),
         }
@@ -148,6 +154,11 @@ impl<R: RunnerStub, Q: RequestStub> Scheduler<R, Q> {
                 }
                 for request_id in state.requests {
                     let reqctx = self.requests.remove(&request_id).unwrap();
+                    if let Some(fctx) =
+                        self.frontends.get_mut(&reqctx.request.frontend_id())
+                    {
+                        fctx.request_ids.remove(&request_id);
+                    }
                     reqctx.request.add_chunk(0, comm::FinishReason::Error);
                 }
             }
@@ -182,6 +193,11 @@ impl<R: RunnerStub, Q: RequestStub> Scheduler<R, Q> {
                 gencfg: request.generation_config().clone(),
             },
         });
+        self.frontends
+            .entry(request.frontend_id())
+            .or_insert_with(|| FrontendContext { request_ids: HashSet::new() })
+            .request_ids
+            .insert(request_id);
         let len = request.input_ids().len() as u32;
         self.requests
             .insert(request_id, RequestContext { request, gpu_uuid, len });
@@ -204,6 +220,12 @@ impl<R: RunnerStub, Q: RequestStub> Scheduler<R, Q> {
             reqctx.len += 1;
 
             if chunk.finish_reason != comm::FinishReason::NotFinished {
+                if let Some(fctx) =
+                    self.frontends.get_mut(&reqctx.request.frontend_id())
+                {
+                    fctx.request_ids.remove(&chunk.request_id);
+                }
+
                 let found = self
                     .gpus_accepting_new_requests
                     .remove(&(gpu_state.requests.len() as u32, gpu.gpu_uuid));
@@ -217,8 +239,12 @@ impl<R: RunnerStub, Q: RequestStub> Scheduler<R, Q> {
         }
     }
 
-    pub fn cancel_textgen(&mut self, msg: &comm::CancelTextGen) {
-        let reqctx = match self.requests.get_mut(&msg.request_id) {
+    pub fn cancel_textgen_internal(
+        &mut self,
+        msg: &comm::CancelTextGen,
+        send_result: bool,
+    ) {
+        let reqctx = match self.requests.remove(&msg.request_id) {
             Some(v) => v,
             None => {
                 error!(reqid=%msg.request_id, "Request not found. Skip.");
@@ -227,6 +253,12 @@ impl<R: RunnerStub, Q: RequestStub> Scheduler<R, Q> {
         };
         let gpu = self.gpus.get_mut(&reqctx.gpu_uuid).unwrap();
         let gpu_state = gpu.state.unwrap_running_mut();
+
+        if let Some(fctx) =
+            self.frontends.get_mut(&reqctx.request.frontend_id())
+        {
+            fctx.request_ids.remove(&msg.request_id);
+        }
 
         let runner = self.runners.get(&gpu.runner_id).unwrap();
         runner.cancel_textgen(comm::CancelTextGenCommand {
@@ -244,7 +276,31 @@ impl<R: RunnerStub, Q: RequestStub> Scheduler<R, Q> {
         self.gpus_accepting_new_requests
             .insert((gpu_state.requests.len() as u32, gpu.gpu_uuid));
         gpu_state.requests.remove(&msg.request_id);
-        reqctx.request.add_chunk(0, comm::FinishReason::Stop);
+
+        if send_result {
+            reqctx.request.add_chunk(0, comm::FinishReason::Stop);
+        }
+    }
+
+    pub fn cancel_textgen(&mut self, msg: &comm::CancelTextGen) {
+        self.cancel_textgen_internal(msg, true);
+    }
+
+    pub fn del_frontend(&mut self, frontend_id: Uuid) {
+        let fctx = match self.frontends.remove(&frontend_id) {
+            Some(v) => v,
+            None => {
+                error!(frontend_id=%frontend_id, "Frontend not found. Skip.");
+                return;
+            }
+        };
+        for request_id in fctx.request_ids {
+            info!(%request_id, "Cancel request because of frontend removal.");
+            self.cancel_textgen_internal(
+                &comm::CancelTextGen { request_id },
+                false,
+            );
+        }
     }
 }
 

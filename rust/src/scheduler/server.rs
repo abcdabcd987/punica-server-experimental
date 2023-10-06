@@ -65,6 +65,7 @@ pub struct Request {
     id: Uuid,
     input_ids: Vec<u32>,
     generation_config: comm::GenerationConfig,
+    frontend_id: Uuid,
     tx: mpsc::UnboundedSender<Message>,
 }
 
@@ -81,6 +82,10 @@ impl RequestStub for Request {
         &self.generation_config
     }
 
+    fn frontend_id(&self) -> Uuid {
+        self.frontend_id
+    }
+
     fn add_chunk(&self, token_id: u32, finish: comm::FinishReason) {
         let msg = comm::SchedulerToFrontendMessage::TextGenChunk(
             comm::TextGenChunk {
@@ -91,7 +96,9 @@ impl RequestStub for Request {
         );
         let m = postcard::to_allocvec(&msg).unwrap();
         let msg = Message::Binary(m);
-        self.tx.send(msg).unwrap();
+        if let Err(e) = self.tx.send(msg) {
+            error!(request_id=%self.id, cause=%e, "Failed to send message to frontend.");
+        }
     }
 }
 
@@ -146,7 +153,9 @@ async fn ws_handler(
         "runner" => {
             ConnectionType::Runner(RunnerConnection { runner_id: None })
         }
-        "frontend" => ConnectionType::Frontend,
+        "frontend" => ConnectionType::Frontend(FrontendConnection {
+            frontend_id: Uuid::now_v7(),
+        }),
         _ => {
             return (axum::http::StatusCode::BAD_REQUEST, "Bad node type")
                 .into_response();
@@ -173,20 +182,24 @@ async fn handle_socket(
 
 enum ConnectionType {
     Runner(RunnerConnection),
-    Frontend,
+    Frontend(FrontendConnection),
 }
 
 impl ConnectionType {
     pub fn type_name(&self) -> &'static str {
         match self {
             ConnectionType::Runner(_) => "runner",
-            ConnectionType::Frontend => "frontend",
+            ConnectionType::Frontend(_) => "frontend",
         }
     }
 }
 
 struct RunnerConnection {
     runner_id: Option<Uuid>,
+}
+
+struct FrontendConnection {
+    frontend_id: Uuid,
 }
 
 struct Connection {
@@ -232,9 +245,14 @@ impl Connection {
                 error!(addr=%conn.addr, conn_type=conn.conn_type.type_name(), cause=%e, "Connection error. Connection closed.");
             }
         }
-        if let ConnectionType::Runner(state) = &conn.conn_type {
-            if let Some(runner_id) = state.runner_id {
-                conn.scheduler.lock().unwrap().del_runner(runner_id);
+        match &conn.conn_type {
+            ConnectionType::Runner(state) => {
+                if let Some(runner_id) = state.runner_id {
+                    conn.scheduler.lock().unwrap().del_runner(runner_id);
+                }
+            }
+            ConnectionType::Frontend(state) => {
+                conn.scheduler.lock().unwrap().del_frontend(state.frontend_id);
             }
         }
     }
@@ -278,11 +296,11 @@ impl Connection {
             Some(Err(e)) => Err(e.into()),
             None => Ok(ControlFlow::Continue(())),
             Some(Ok(Message::Binary(m))) => {
-                match &self.conn_type {
+                match &mut self.conn_type {
                     ConnectionType::Runner(_) => {
                         self.handle_runner_message(postcard::from_bytes(&m)?)?;
                     }
-                    ConnectionType::Frontend => {
+                    ConnectionType::Frontend(_) => {
                         self.handle_frontend_message(postcard::from_bytes(
                             &m,
                         )?)?;
@@ -344,12 +362,17 @@ impl Connection {
         msg: comm::FrontendToSchedulerMessage,
     ) -> anyhow::Result<()> {
         use comm::FrontendToSchedulerMessage::*;
+        let state = match &mut self.conn_type {
+            ConnectionType::Frontend(state) => state,
+            _ => unreachable!(),
+        };
         match msg {
             TextGenRequest(m) => {
                 let req = Request {
                     id: m.request_id,
                     input_ids: m.input_ids,
                     generation_config: m.gencfg,
+                    frontend_id: state.frontend_id,
                     tx: self.ch_send.clone(),
                 };
                 self.scheduler.lock().unwrap().add_textgen(req);
