@@ -95,7 +95,7 @@ impl<R: RunnerStub, Q: RequestStub> Scheduler<R, Q> {
                 );
                 continue;
             }
-            let max_batch_size = u32::max(max_batch_size as u32, 32);
+            let max_batch_size = u32::min(max_batch_size as u32, 32);
             self.gpus.insert(
                 prop.uuid,
                 GpuContext {
@@ -146,12 +146,10 @@ impl<R: RunnerStub, Q: RequestStub> Scheduler<R, Q> {
                 }
             };
             if let GpuState::Running(state) = gpu.state {
-                let found = self
-                    .gpus_accepting_new_requests
-                    .remove(&(state.requests.len() as u32, gpu.gpu_uuid));
-                if !found {
-                    panic!("Corrupted gpus_accepting_new_requests");
-                }
+                assert!(
+                    self.gpus_accepting_new_requests
+                        .remove(&(state.requests.len() as u32, gpu.gpu_uuid))
+                );
                 for request_id in state.requests {
                     let reqctx = self.requests.remove(&request_id).unwrap();
                     if let Some(fctx) =
@@ -171,7 +169,7 @@ impl<R: RunnerStub, Q: RequestStub> Scheduler<R, Q> {
         let (_, gpu_uuid) = match self.gpus_accepting_new_requests.pop_last() {
             Some(v) => v,
             None => {
-                error!(reqid=%request.id(), "Unable to schedule textgen. No GPU available.");
+                warn!(reqid=%request.id(), "Unable to schedule textgen. No GPU available.");
                 return false;
             }
         };
@@ -185,6 +183,7 @@ impl<R: RunnerStub, Q: RequestStub> Scheduler<R, Q> {
             self.gpus_accepting_new_requests
                 .insert((gpu_state.requests.len() as u32, gpu.gpu_uuid));
         }
+        debug!(%request_id, %gpu_uuid, gpu_batch_size=%gpu_state.requests.len(), "Add textgen request.");
         runner.run_textgen(comm::RunTextGenCommand {
             gpu_uuid,
             req: comm::TextGenRequest {
@@ -209,7 +208,7 @@ impl<R: RunnerStub, Q: RequestStub> Scheduler<R, Q> {
             let reqctx = match self.requests.get_mut(&chunk.request_id) {
                 Some(v) => v,
                 None => {
-                    error!(reqid=%chunk.request_id, "Request not found. Skip.");
+                    warn!(reqid=%chunk.request_id, "Request not found. Skip.");
                     continue;
                 }
             };
@@ -226,15 +225,17 @@ impl<R: RunnerStub, Q: RequestStub> Scheduler<R, Q> {
                     fctx.request_ids.remove(&chunk.request_id);
                 }
 
-                let found = self
-                    .gpus_accepting_new_requests
-                    .remove(&(gpu_state.requests.len() as u32, gpu.gpu_uuid));
-                if !found {
-                    panic!("Corrupted gpus_accepting_new_requests");
+                if (gpu_state.requests.len() as u32) < gpu.max_batch_size {
+                    assert!(self.gpus_accepting_new_requests.remove(&(
+                        gpu_state.requests.len() as u32,
+                        gpu.gpu_uuid
+                    )));
                 }
-                gpu_state.requests.remove(&chunk.request_id);
+                assert!(gpu_state.requests.remove(&chunk.request_id));
                 self.gpus_accepting_new_requests
                     .insert((gpu_state.requests.len() as u32, gpu.gpu_uuid));
+                self.requests.remove(&chunk.request_id);
+                debug!(request_id=%chunk.request_id, gpu_uuid=%gpu.gpu_uuid, gpu_batch_size=%gpu_state.requests.len(), "Textgen finished.");
             }
         }
     }
@@ -247,7 +248,7 @@ impl<R: RunnerStub, Q: RequestStub> Scheduler<R, Q> {
         let reqctx = match self.requests.remove(&msg.request_id) {
             Some(v) => v,
             None => {
-                error!(reqid=%msg.request_id, "Request not found. Skip.");
+                warn!(reqid=%msg.request_id, "Request not found. Skip.");
                 return;
             }
         };
@@ -266,16 +267,16 @@ impl<R: RunnerStub, Q: RequestStub> Scheduler<R, Q> {
             request_id: msg.request_id,
         });
 
-        let found = self
-            .gpus_accepting_new_requests
-            .remove(&(gpu_state.requests.len() as u32, gpu.gpu_uuid));
-        if !found {
-            panic!("Corrupted gpus_accepting_new_requests");
+        if (gpu_state.requests.len() as u32) < gpu.max_batch_size {
+            assert!(
+                self.gpus_accepting_new_requests
+                    .remove(&(gpu_state.requests.len() as u32, gpu.gpu_uuid))
+            );
         }
-        gpu_state.requests.remove(&msg.request_id);
+        assert!(gpu_state.requests.remove(&msg.request_id));
         self.gpus_accepting_new_requests
             .insert((gpu_state.requests.len() as u32, gpu.gpu_uuid));
-        gpu_state.requests.remove(&msg.request_id);
+        debug!(request_id=%msg.request_id, gpu_uuid=%gpu.gpu_uuid, gpu_batch_size=%gpu_state.requests.len(), "Cancel textgen.");
 
         if send_result {
             reqctx.request.add_chunk(0, comm::FinishReason::Stop);

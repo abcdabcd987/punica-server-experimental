@@ -30,7 +30,7 @@ def parse_gap(s: str, rate: float) -> scipy.stats.rv_continuous:
     exp
   """
   if s == "exp":
-    return scipy.stats.expon(1 / rate)
+    return scipy.stats.expon(scale=1 / rate)
 
 
 @dataclasses.dataclass(frozen=True)
