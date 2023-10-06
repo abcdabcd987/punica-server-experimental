@@ -10,7 +10,7 @@ use crate::model_config;
 
 #[derive(Debug, clap::Args)]
 pub struct SchedulerArgs {
-    #[arg(long, default_value = "[::1]:23081")]
+    #[arg(long, default_value = "127.0.0.1:23081")]
     pub ws_bind: SocketAddr,
 }
 

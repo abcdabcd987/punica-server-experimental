@@ -86,6 +86,7 @@ fn read_trace(path: Option<&Path>) -> anyhow::Result<TraceSpec> {
 }
 
 async fn loadgen(trace: TraceSpec, scheduler: SchedulerClient) {
+    println!("start");
     let start_at = Instant::now();
     let start_at_nanos = chrono::Utc::now().timestamp_nanos();
     let mut joinset = tokio::task::JoinSet::new();
