@@ -12,6 +12,7 @@ use tokio::task::JoinHandle;
 use uuid::Uuid;
 
 use crate::comm;
+use crate::paged_kv_tracker::PagedKvTracker;
 
 #[derive(Serialize, Debug)]
 #[serde(tag = "t", content = "c")]
@@ -52,6 +53,7 @@ pub struct TextGenerationChunkResponse {
     pub request_ids: Vec<Uuid>,
     pub token_ids: Vec<u32>,
     pub finish_reasons: Vec<comm::FinishReason>,
+    pub num_free_kv_blocks: u32,
 }
 
 pub struct ExecutorSubprocess {
@@ -162,13 +164,19 @@ impl ExecutorSubprocess {
     }
 }
 
+// TODO: replace this with a command queue.
 struct UnfinishedRequests {
+    // Accessible by both the main thread and the back-to-back schedule thread.
     cancel: HashSet<Uuid>,
     enqueue: Vec<(Uuid, Vec<u32>, comm::GenerationConfig)>,
-    step: Vec<Uuid>,
+
+    // Only accessible by the back-to-back schedule thread.
+    prefill: HashSet<Uuid>,
+    decode: HashSet<Uuid>,
 }
 
 pub struct GpuExecutor {
+    gpu_uuid: Uuid,
     unfinished: Arc<Mutex<UnfinishedRequests>>,
     state: State,
 }
@@ -181,7 +189,7 @@ enum State {
 
 struct SpawnedState {
     subprocess: ExecutorSubprocess,
-    tx: mpsc::UnboundedSender<comm::TextGenChunk>,
+    tx: mpsc::UnboundedSender<comm::BatchedTextGenChunk>,
 }
 
 struct BackToBackScheduleHandle {
@@ -191,11 +199,13 @@ struct BackToBackScheduleHandle {
 }
 
 struct BackToBackSchedule {
+    gpu_uuid: Uuid,
     new_task: Arc<Notify>,
     shutdown: Arc<Notify>,
     subprocess: ExecutorSubprocess,
     unfinished: Arc<Mutex<UnfinishedRequests>>,
-    tx: mpsc::UnboundedSender<comm::TextGenChunk>,
+    tx: mpsc::UnboundedSender<comm::BatchedTextGenChunk>,
+    kvpool: PagedKvTracker,
 }
 
 impl GpuExecutor {
@@ -203,19 +213,20 @@ impl GpuExecutor {
         gpu_uuid: Uuid,
     ) -> anyhow::Result<(
         Child,
-        mpsc::UnboundedReceiver<comm::TextGenChunk>,
+        mpsc::UnboundedReceiver<comm::BatchedTextGenChunk>,
         Self,
     )> {
         let (child, subprocess) = ExecutorSubprocess::spawn(gpu_uuid)?;
         let unfinished = Arc::new(Mutex::new(UnfinishedRequests {
             cancel: HashSet::new(),
             enqueue: Vec::new(),
-            step: Vec::new(),
+            prefill: HashSet::new(),
+            decode: HashSet::new(),
         }));
         let (tx, rx) = mpsc::unbounded_channel();
         let state = State::Spawned(SpawnedState { subprocess, tx });
 
-        Ok((child, rx, Self { unfinished, state }))
+        Ok((child, rx, Self { gpu_uuid, unfinished, state }))
     }
 
     fn unwrap_spawned_mut(&mut self) -> &mut SpawnedState {
@@ -232,18 +243,20 @@ impl GpuExecutor {
         }
     }
 
-    fn start_back_to_back_schedule(&mut self) {
+    fn start_back_to_back_schedule(&mut self, kvpool: PagedKvTracker) {
         let state = std::mem::replace(&mut self.state, State::Invalid);
         match state {
             State::Spawned(SpawnedState { subprocess, tx }) => {
                 let notify_new_task = Arc::new(Notify::new());
                 let notify_shutdown = Arc::new(Notify::new());
                 let mut b = BackToBackSchedule {
+                    gpu_uuid: self.gpu_uuid,
                     new_task: notify_new_task.clone(),
                     shutdown: notify_shutdown.clone(),
                     subprocess,
                     unfinished: self.unfinished.clone(),
                     tx,
+                    kvpool,
                 };
                 let join = tokio::spawn(async move { b.run().await });
                 let bh = BackToBackScheduleHandle {
@@ -268,13 +281,15 @@ impl GpuExecutor {
             .subprocess
             .init(model_path, dtype_str, block_len, kvpool_capacity)
             .await?;
-        self.start_back_to_back_schedule();
+        let kvpool = PagedKvTracker::new(kvpool_capacity, block_len);
+        self.start_back_to_back_schedule(kvpool);
         Ok(())
     }
 
     pub async fn init_fake(&mut self) -> anyhow::Result<()> {
         self.unwrap_spawned_mut().subprocess.init_fake().await?;
-        self.start_back_to_back_schedule();
+        let kvpool = PagedKvTracker::new(1000, 16);
+        self.start_back_to_back_schedule(kvpool);
         Ok(())
     }
 
@@ -325,106 +340,142 @@ impl BackToBackSchedule {
     }
 
     async fn process_unfinished(&mut self) -> anyhow::Result<bool> {
-        enum Task {
-            Cancel(HashSet<Uuid>),
-            Enqueue(Vec<(Uuid, Vec<u32>, comm::GenerationConfig)>),
-            Step,
-            None,
+        if self.process_unfinished_cancel().await? {
+            return Ok(true);
         }
-        let task = {
-            let mut unfinished = self.unfinished.lock().await;
-            if !unfinished.cancel.is_empty() {
-                Task::Cancel(unfinished.cancel.drain().collect())
-            } else if !unfinished.enqueue.is_empty() {
-                Task::Enqueue(unfinished.enqueue.drain(..).collect())
-            } else if !unfinished.step.is_empty() {
-                Task::Step
+        if self.process_unfinished_enqueue().await? {
+            return Ok(true);
+        }
+        if self.process_unfinished_step().await? {
+            return Ok(true);
+        }
+        Ok(false)
+    }
+
+    async fn process_unfinished_cancel(&mut self) -> anyhow::Result<bool> {
+        let mut unfinished_guard = self.unfinished.lock().await;
+        let unfinished = &mut *unfinished_guard;
+        if unfinished.cancel.is_empty() {
+            return Ok(false);
+        }
+
+        // Remove from pending enqueue
+        let mut i = 0usize;
+        while i < unfinished.enqueue.len() && !unfinished.cancel.is_empty() {
+            let reqid = unfinished.enqueue[i].0;
+            if unfinished.cancel.contains(&reqid) {
+                unfinished.enqueue.swap_remove(i);
+                unfinished.cancel.remove(&reqid);
             } else {
-                Task::None
+                i += 1;
             }
-        };
-        match task {
-            Task::Cancel(cancel) => {
-                self.process_unfinished_cancel(cancel).await?;
-            }
-            Task::Enqueue(enqueue) => {
-                self.process_unfinished_enqueue(enqueue).await?;
-            }
-            Task::Step => {
-                self.process_unfinished_step().await?;
-            }
-            Task::None => return Ok(false),
         }
+
+        // Remove from running requests
+        for reqid in unfinished.cancel.iter() {
+            self.subprocess.cancel_request(*reqid).await?;
+            self.kvpool.release(*reqid);
+            unfinished.prefill.remove(reqid);
+            unfinished.decode.remove(reqid);
+        }
+        unfinished.cancel.clear();
         Ok(true)
     }
 
-    async fn process_unfinished_cancel(
-        &mut self,
-        mut cancel: HashSet<Uuid>,
-    ) -> anyhow::Result<()> {
-        {
-            let mut unfinished = self.unfinished.lock().await;
-            let mut i = 0usize;
-            while i < unfinished.enqueue.len() && !cancel.is_empty() {
-                let reqid = unfinished.enqueue[i].0;
-                if cancel.contains(&reqid) {
-                    unfinished.enqueue.swap_remove(i);
-                    cancel.remove(&reqid);
-                } else {
-                    i += 1;
-                }
-            }
+    async fn process_unfinished_enqueue(&mut self) -> anyhow::Result<bool> {
+        let mut unfinished_guard = self.unfinished.lock().await;
+        let unfinished = &mut *unfinished_guard;
+        if unfinished.enqueue.is_empty() {
+            return Ok(false);
         }
 
-        for reqid in &cancel {
-            self.subprocess.cancel_request(*reqid).await?;
+        // Don't enqueue if not enough free blocks
+        let mut new_kv_blocks = 0;
+        for (_reqid, input_ids, _gencfg) in &unfinished.enqueue {
+            new_kv_blocks +=
+                self.kvpool.calc_init_blocks(input_ids.len() as u32);
         }
-        let mut unfinished = self.unfinished.lock().await;
-        unfinished.step.retain(|reqid| !cancel.contains(reqid));
-        Ok(())
-    }
+        if new_kv_blocks > self.kvpool.num_free_blocks() {
+            return Ok(false);
+        }
 
-    async fn process_unfinished_enqueue(
-        &mut self,
-        enqueue: Vec<(Uuid, Vec<u32>, comm::GenerationConfig)>,
-    ) -> anyhow::Result<()> {
-        let mut reqids = Vec::with_capacity(enqueue.len());
-        for (reqid, input_ids, gencfg) in &enqueue {
+        // Do enqueue
+        let mut reqids = Vec::with_capacity(unfinished.enqueue.len());
+        for (reqid, input_ids, gencfg) in &unfinished.enqueue {
+            assert!(self.kvpool.init(*reqid, input_ids.len() as u32));
             self.subprocess.add_request(*reqid, input_ids, gencfg).await?;
             reqids.push(*reqid);
         }
-        self.unfinished.lock().await.step.append(&mut reqids);
-        Ok(())
+        unfinished.prefill.extend(reqids);
+        unfinished.enqueue.clear();
+        Ok(true)
     }
 
-    async fn process_unfinished_step(&mut self) -> anyhow::Result<()> {
-        let res: TextGenerationChunkResponse = self.subprocess.step().await?;
-
-        let mut unfinished = self.unfinished.lock().await;
-
-        if unfinished.step.len() != res.request_ids.len() {
-            panic!(
-                "Inconsistent state between parent and Python child process. Differnt number of requests. Parent={}, Subprocess={}",
-                unfinished.step.len(),
-                res.request_ids.len()
-            );
+    async fn process_unfinished_step(&mut self) -> anyhow::Result<bool> {
+        let unfinished = self.unfinished.lock().await;
+        if unfinished.prefill.is_empty() && unfinished.decode.is_empty() {
+            return Ok(false);
         }
 
-        let mut remain = Vec::with_capacity(unfinished.step.len());
+        // Don't step if not enough free blocks. Being conservative here.
+        if self.kvpool.num_free_blocks() < unfinished.decode.len() as u32 {
+            return Ok(false);
+        }
+
+        // Release lock. Otherwise it will block adding enqueue and cancel.
+        let total_len = unfinished.prefill.len() + unfinished.decode.len();
+        drop(unfinished);
+
+        // Let the subprocess do its thing.
+        let res: TextGenerationChunkResponse = self.subprocess.step().await?;
+
+        // Reacquire lock and process the response.
+        let mut unfinished_guard = self.unfinished.lock().await;
+        let unfinished = &mut *unfinished_guard;
+
+        // TODO: use a command queue to replace Arc<Mutex<UnfinishedRequests>>
+        assert_eq!(
+            total_len,
+            unfinished.prefill.len() + unfinished.decode.len(),
+            "Sanity check: nobody should touch unfinished.prefill and unfinished.decode while we don't hold the lock."
+        );
+
+        // Track KvCache usage: decode
+        assert_eq!(total_len, res.request_ids.len());
+        for reqid in unfinished.decode.iter() {
+            assert!(self.kvpool.append_token(reqid));
+        }
+
+        // Move all prefill to decode
+        unfinished.decode.extend(unfinished.prefill.drain());
+
+        // Handle outputs
+        let mut chunks = Vec::with_capacity(res.request_ids.len());
         for (reqid, token_id, finish) in
             izip!(res.request_ids, res.token_ids, res.finish_reasons)
         {
-            if finish == comm::FinishReason::NotFinished {
-                remain.push(reqid);
+            if finish != comm::FinishReason::NotFinished {
+                assert!(unfinished.decode.remove(&reqid));
+
+                // Track KvCache usage: finish
+                self.kvpool.release(reqid);
             }
-            self.tx.send(comm::TextGenChunk {
+            chunks.push(comm::TextGenChunk {
                 request_id: reqid,
                 token_id,
                 finish_reason: finish,
-            })?;
+            });
         }
-        unfinished.step = remain;
 
-        Ok(())
+        // Track KvCache usage: free blocks
+        assert_eq!(self.kvpool.num_free_blocks(), res.num_free_kv_blocks);
+
+        self.tx.send(comm::BatchedTextGenChunk {
+            chunks,
+            gpu_uuid: self.gpu_uuid,
+            num_free_kv_blocks: self.kvpool.num_free_blocks(),
+        })?;
+
+        Ok(true)
     }
 }

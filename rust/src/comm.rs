@@ -83,6 +83,7 @@ pub struct CudaDeviceProp {
 pub struct AddRunnerRequest {
     pub runner_id: Uuid,
     pub devices: Vec<CudaDeviceProp>,
+    pub limit_gpumem: Option<u64>,
 }
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -120,6 +121,8 @@ pub struct CancelTextGenCommand {
 #[derive(Serialize, Deserialize, Debug)]
 pub struct BatchedTextGenChunk {
     pub chunks: Vec<TextGenChunk>,
+    pub gpu_uuid: Uuid,
+    pub num_free_kv_blocks: u32,
 }
 
 //====== Frontend ======

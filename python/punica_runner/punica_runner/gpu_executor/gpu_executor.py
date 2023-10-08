@@ -38,6 +38,7 @@ class TextGenerationChunkResponse(TypedDict):
   request_ids: list[bytes]
   token_ids: list[int]
   finish_reasons: list[int]
+  num_free_kv_blocks: int
 
 
 class GenerationContext:
@@ -203,6 +204,7 @@ class GpuExecutor:
         "request_ids": [x.bytes for x in request_ids],
         "token_ids": token_ids,
         "finish_reasons": finish_reasons,
+        "num_free_kv_blocks": self.kvpool.num_free_blocks,
     }
 
 
@@ -230,9 +232,11 @@ class FakeGpuExecutor:
     self._del_request(reqid)
 
   def step(self) -> TextGenerationChunkResponse:
+    request_ids = []
     token_ids = []
     finish_reasons = []
     for reqid, reqctx in self._reqctx.items():
+      request_ids.append(reqid.bytes)
       if reqctx["rng"].random() < 0.1:
         next_token_id = reqctx["gencfg"]["stop_token_id"]
         finish = FinishReason.Stop
@@ -244,6 +248,8 @@ class FakeGpuExecutor:
       if finish != FinishReason.NotFinished:
         self._del_request(reqid)
     return {
+        "request_ids": request_ids,
         "token_ids": token_ids,
         "finish_reasons": finish_reasons,
+        "num_free_kv_blocks": 1000,
     }

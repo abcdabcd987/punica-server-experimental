@@ -10,13 +10,14 @@ use crate::comm;
 
 struct Gpu {
     devprop: comm::CudaDeviceProp,
-    rx: Option<mpsc::UnboundedReceiver<comm::TextGenChunk>>,
+    rx: Option<mpsc::UnboundedReceiver<comm::BatchedTextGenChunk>>,
     executor: GpuExecutor,
 }
 
 pub struct Runner {
     model_path: PathBuf,
     use_fake_executor: bool,
+    limit_gpumem: Option<u64>,
 
     uuid: Uuid,
     gpus: DashMap<Uuid, Gpu>,
@@ -27,9 +28,10 @@ impl Runner {
     pub fn new(
         model_path: PathBuf,
         use_fake_executor: bool,
+        limit_gpumem_gb: Option<u64>,
         devprops: Vec<comm::CudaDeviceProp>,
         gpu_executors: Vec<(
-            mpsc::UnboundedReceiver<comm::TextGenChunk>,
+            mpsc::UnboundedReceiver<comm::BatchedTextGenChunk>,
             GpuExecutor,
         )>,
         scheduler_tx: mpsc::Sender<Message>,
@@ -40,7 +42,14 @@ impl Runner {
         {
             gpus.insert(devprop.uuid, Gpu { devprop, rx: Some(rx), executor });
         }
-        Ok(Self { model_path, use_fake_executor, uuid, gpus, scheduler_tx })
+        Ok(Self {
+            model_path,
+            use_fake_executor,
+            limit_gpumem: limit_gpumem_gb.map(|gb| gb * 1024 * 1024 * 1024),
+            uuid,
+            gpus,
+            scheduler_tx,
+        })
     }
 
     async fn send_message(&self, msg: &comm::RunnerToSchedulerMessage) {
@@ -58,6 +67,7 @@ impl Runner {
                     .iter()
                     .map(|gpu| gpu.devprop.clone())
                     .collect(),
+                limit_gpumem: self.limit_gpumem,
             },
         ))
         .await;
@@ -85,9 +95,8 @@ impl Runner {
         let scheduler_tx = self.scheduler_tx.clone();
         tokio::spawn(async move {
             while let Some(chunk) = gpu_rx.recv().await {
-                let msg = comm::RunnerToSchedulerMessage::BatchedTextGenChunk(
-                    comm::BatchedTextGenChunk { chunks: vec![chunk] },
-                );
+                let msg =
+                    comm::RunnerToSchedulerMessage::BatchedTextGenChunk(chunk);
                 scheduler_tx
                     .send(Message::Binary(postcard::to_stdvec(&msg).unwrap()))
                     .await

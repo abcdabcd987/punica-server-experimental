@@ -21,6 +21,8 @@ pub struct RunnerArgs {
     pub scheduler_url: Url,
     #[arg(long, help = "Use FakeGpuExecutor")]
     pub fake_executor: bool,
+    #[arg(long, help = "Limit GPU memory usage in GB")]
+    pub limit_gpumem_gb: Option<u64>,
 }
 
 pub async fn runner_main(args: RunnerArgs) -> anyhow::Result<()> {
@@ -48,6 +50,7 @@ pub async fn runner_main(args: RunnerArgs) -> anyhow::Result<()> {
     let runner = Arc::new(Runner::new(
         args.model_path,
         args.fake_executor,
+        args.limit_gpumem_gb,
         devprops,
         gpu_executors,
         ch_send,

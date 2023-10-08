@@ -5,6 +5,7 @@ mod comm;
 mod frontend;
 mod loadgen;
 mod model_config;
+mod paged_kv_tracker;
 mod runner;
 mod scheduler;
 mod scheduler_client;
