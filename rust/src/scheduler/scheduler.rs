@@ -5,6 +5,7 @@ use uuid::Uuid;
 use super::traits::{RequestStub, RunnerStub};
 use crate::comm;
 use crate::model_config::LlamaModelConfig;
+use crate::paged_kv_tracker::PagedKvTracker;
 
 pub struct Scheduler<R: RunnerStub, Q: RequestStub> {
     model_config: LlamaModelConfig,
@@ -28,12 +29,18 @@ struct GpuContext {
 
 enum GpuState {
     Invalid,
-    Initing,
+    Initing(InitingGpu),
     Running(RunningGpu),
+}
+
+struct InitingGpu {
+    kvpool_capacity: u32,
+    kv_block_len: u32,
 }
 
 struct RunningGpu {
     requests: HashSet<Uuid>,
+    kvpool: PagedKvTracker,
 }
 
 struct RequestContext<Q: RequestStub> {
@@ -103,7 +110,10 @@ impl<R: RunnerStub, Q: RequestStub> Scheduler<R, Q> {
                     runner_id: runner.id(),
                     devprop: prop.clone(),
                     max_batch_size,
-                    state: GpuState::Initing,
+                    state: GpuState::Initing(InitingGpu {
+                        kvpool_capacity: kvpool_capacity as u32,
+                        kv_block_len: block_len as u32,
+                    }),
                 },
             );
             runner.init_gpu(comm::AcquireGpuCommand {
@@ -119,12 +129,15 @@ impl<R: RunnerStub, Q: RequestStub> Scheduler<R, Q> {
 
     pub fn notify_gpu_initialized(&mut self, msg: &comm::AcquireGpuResponse) {
         let gpu = self.gpus.get_mut(&msg.gpu_uuid).unwrap();
-        match &mut gpu.state {
-            GpuState::Initing => (),
+        let init = match &gpu.state {
+            GpuState::Initing(v) => v,
             _ => panic!("Invalid state."),
-        }
+        };
 
-        gpu.state = GpuState::Running(RunningGpu { requests: HashSet::new() });
+        let kvpool =
+            PagedKvTracker::new(init.kvpool_capacity, init.kv_block_len);
+        gpu.state =
+            GpuState::Running(RunningGpu { requests: HashSet::new(), kvpool });
         self.gpus_accepting_new_requests.insert((0, gpu.gpu_uuid));
         info!(runner_id=%gpu.runner_id, gpu_uuid=%gpu.gpu_uuid, gpu_name=%gpu.devprop.name, "GPU initialized.");
     }
@@ -204,16 +217,27 @@ impl<R: RunnerStub, Q: RequestStub> Scheduler<R, Q> {
     }
 
     pub fn notify_textgen_chunk(&mut self, msg: &comm::BatchedTextGenChunk) {
+        let gpu = self.gpus.get_mut(&msg.gpu_uuid).unwrap();
+        let gpu_state = gpu.state.unwrap_running_mut();
+
+        // TODO: a better way to handle cancelled requests.
+        let mut some_missing = false;
+
         for chunk in &msg.chunks {
             let reqctx = match self.requests.get_mut(&chunk.request_id) {
                 Some(v) => v,
                 None => {
                     warn!(reqid=%chunk.request_id, "Request not found. Skip.");
+                    some_missing = true;
                     continue;
                 }
             };
-            let gpu = self.gpus.get_mut(&reqctx.gpu_uuid).unwrap();
-            let gpu_state = gpu.state.unwrap_running_mut();
+
+            if reqctx.len == reqctx.request.input_ids().len() as u32 {
+                assert!(gpu_state.kvpool.init(chunk.request_id, reqctx.len));
+            } else {
+                gpu_state.kvpool.append_token(&chunk.request_id);
+            }
 
             reqctx.request.add_chunk(chunk.token_id, chunk.finish_reason);
             reqctx.len += 1;
@@ -236,7 +260,16 @@ impl<R: RunnerStub, Q: RequestStub> Scheduler<R, Q> {
                     .insert((gpu_state.requests.len() as u32, gpu.gpu_uuid));
                 self.requests.remove(&chunk.request_id);
                 debug!(request_id=%chunk.request_id, gpu_uuid=%gpu.gpu_uuid, gpu_batch_size=%gpu_state.requests.len(), "Textgen finished.");
+
+                gpu_state.kvpool.release(chunk.request_id);
             }
+        }
+
+        if !some_missing {
+            assert_eq!(
+                gpu_state.kvpool.num_free_blocks(),
+                msg.num_free_kv_blocks
+            );
         }
     }
 
@@ -277,6 +310,8 @@ impl<R: RunnerStub, Q: RequestStub> Scheduler<R, Q> {
         self.gpus_accepting_new_requests
             .insert((gpu_state.requests.len() as u32, gpu.gpu_uuid));
         debug!(request_id=%msg.request_id, gpu_uuid=%gpu.gpu_uuid, gpu_batch_size=%gpu_state.requests.len(), "Cancel textgen.");
+
+        gpu_state.kvpool.release(msg.request_id);
 
         if send_result {
             reqctx.request.add_chunk(0, comm::FinishReason::Stop);
