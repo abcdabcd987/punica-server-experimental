@@ -21,8 +21,10 @@ pub trait RequestStub {
     fn id(&self) -> Uuid;
     fn input_ids(&self) -> &[u32];
     fn generation_config(&self) -> &comm::GenerationConfig;
+    fn tokens(&self) -> &[u32];
+    fn len(&self) -> u32;
     fn frontend_id(&self) -> Uuid;
 
     // Commands
-    fn add_chunk(&self, token_id: u32, finish: comm::FinishReason);
+    fn add_chunk(&mut self, token_id: u32, finish: comm::FinishReason);
 }

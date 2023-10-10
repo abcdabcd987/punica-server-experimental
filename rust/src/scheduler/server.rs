@@ -63,7 +63,8 @@ impl RunnerDelegate {
 
 pub struct Request {
     id: Uuid,
-    input_ids: Vec<u32>,
+    prompt_len: u32,
+    tokens: Vec<u32>,
     generation_config: comm::GenerationConfig,
     frontend_id: Uuid,
     tx: mpsc::UnboundedSender<Message>,
@@ -75,21 +76,33 @@ impl RequestStub for Request {
     }
 
     fn input_ids(&self) -> &[u32] {
-        &self.input_ids
+        &self.tokens[..self.prompt_len as usize]
     }
 
     fn generation_config(&self) -> &comm::GenerationConfig {
         &self.generation_config
     }
 
+    fn tokens(&self) -> &[u32] {
+        &self.tokens
+    }
+
+    fn len(&self) -> u32 {
+        self.tokens.len() as u32
+    }
+
     fn frontend_id(&self) -> Uuid {
         self.frontend_id
     }
 
-    fn add_chunk(&self, token_id: u32, finish: comm::FinishReason) {
+    fn add_chunk(&mut self, token_id: u32, finish: comm::FinishReason) {
+        let index = self.tokens.len() as u32;
+        self.tokens.push(token_id);
+
         let msg = comm::SchedulerToFrontendMessage::TextGenChunk(
             comm::TextGenChunk {
                 request_id: self.id,
+                index,
                 token_id,
                 finish_reason: finish,
             },
@@ -370,7 +383,8 @@ impl Connection {
             TextGenRequest(m) => {
                 let req = Request {
                     id: m.request_id,
-                    input_ids: m.input_ids,
+                    prompt_len: m.input_ids.len() as u32,
+                    tokens: m.input_ids,
                     generation_config: m.gencfg,
                     frontend_id: state.frontend_id,
                     tx: self.ch_send.clone(),

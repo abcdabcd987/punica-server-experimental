@@ -154,7 +154,7 @@ impl<R: RunnerStub, Q: RequestStub> Scheduler<R, Q> {
             };
             if let GpuState::Running(state) = gpu.state {
                 for request_id in state.requests {
-                    let reqctx = self.requests.remove(&request_id).unwrap();
+                    let mut reqctx = self.requests.remove(&request_id).unwrap();
                     if let Some(fctx) =
                         self.frontends.get_mut(&reqctx.request.frontend_id())
                     {
@@ -207,6 +207,7 @@ impl<R: RunnerStub, Q: RequestStub> Scheduler<R, Q> {
 
         let request_id = request.id();
         gpu_state.requests.insert(request_id);
+        assert!(gpu_state.kvpool.init(request_id, prompt_len));
         debug!(%request_id, %gpu_uuid, gpu_batch_size=%gpu_state.requests.len(), "Add textgen request.");
         runner.run_textgen(comm::RunTextGenCommand {
             gpu_uuid,
@@ -231,26 +232,23 @@ impl<R: RunnerStub, Q: RequestStub> Scheduler<R, Q> {
     pub fn notify_textgen_chunk(&mut self, msg: &comm::BatchedTextGenChunk) {
         let gpu = self.gpus.get_mut(&msg.gpu_uuid).unwrap();
         let gpu_state = gpu.state.unwrap_running_mut();
-
-        // TODO: a better way to handle cancelled requests.
-        let mut some_missing = false;
-
         for chunk in &msg.chunks {
             let reqctx = match self.requests.get_mut(&chunk.request_id) {
                 Some(v) => v,
                 None => {
                     warn!(reqid=%chunk.request_id, "Request not found. Skip.");
-                    some_missing = true;
                     continue;
                 }
             };
 
-            if reqctx.len == reqctx.request.input_ids().len() as u32 {
-                assert!(gpu_state.kvpool.init(chunk.request_id, reqctx.len));
-            } else {
+            if reqctx.len != reqctx.request.input_ids().len() as u32 {
                 gpu_state.kvpool.append_token(&chunk.request_id);
             }
 
+            if chunk.index != reqctx.len {
+                warn!(request_id=%chunk.request_id, expected_index=reqctx.len, chunk_index=chunk.index, "Chunk index mismatch. Ignore this chunk.");
+                continue;
+            }
             reqctx.request.add_chunk(chunk.token_id, chunk.finish_reason);
             reqctx.len += 1;
 
@@ -268,13 +266,6 @@ impl<R: RunnerStub, Q: RequestStub> Scheduler<R, Q> {
                 gpu_state.kvpool.release(chunk.request_id);
             }
         }
-
-        if !some_missing {
-            assert_eq!(
-                gpu_state.kvpool.num_free_blocks(),
-                msg.num_free_kv_blocks
-            );
-        }
     }
 
     pub fn cancel_textgen_internal(
@@ -282,7 +273,7 @@ impl<R: RunnerStub, Q: RequestStub> Scheduler<R, Q> {
         msg: &comm::CancelTextGen,
         send_result: bool,
     ) {
-        let reqctx = match self.requests.remove(&msg.request_id) {
+        let mut reqctx = match self.requests.remove(&msg.request_id) {
             Some(v) => v,
             None => {
                 warn!(reqid=%msg.request_id, "Request not found. Skip.");
@@ -326,8 +317,8 @@ impl<R: RunnerStub, Q: RequestStub> Scheduler<R, Q> {
                 return;
             }
         };
+        info!(%frontend_id, "Cancel all requests because the frontend is removed.");
         for request_id in fctx.request_ids {
-            info!(%request_id, "Cancel request because of frontend removal.");
             self.cancel_textgen_internal(
                 &comm::CancelTextGen { request_id },
                 false,

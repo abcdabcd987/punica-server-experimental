@@ -51,6 +51,7 @@ struct CancelRequest {
 #[derive(Deserialize, Debug)]
 pub struct TextGenerationChunkResponse {
     pub request_ids: Vec<Uuid>,
+    pub indicies: Vec<u32>,
     pub token_ids: Vec<u32>,
     pub finish_reasons: Vec<comm::FinishReason>,
     pub num_free_kv_blocks: u32,
@@ -451,9 +452,12 @@ impl BackToBackSchedule {
 
         // Handle outputs
         let mut chunks = Vec::with_capacity(res.request_ids.len());
-        for (reqid, token_id, finish) in
-            izip!(res.request_ids, res.token_ids, res.finish_reasons)
-        {
+        for (reqid, index, token_id, finish) in izip!(
+            res.request_ids,
+            res.indicies,
+            res.token_ids,
+            res.finish_reasons
+        ) {
             if finish != comm::FinishReason::NotFinished {
                 assert!(unfinished.decode.remove(&reqid));
 
@@ -462,6 +466,7 @@ impl BackToBackSchedule {
             }
             chunks.push(comm::TextGenChunk {
                 request_id: reqid,
+                index,
                 token_id,
                 finish_reason: finish,
             });

@@ -36,6 +36,7 @@ class FinishReason(enum.Enum):
 # Sync with `GenerationContextChunk` in rust/src/runner/executor.rs.
 class TextGenerationChunkResponse(TypedDict):
   request_ids: list[bytes]
+  indicies: list[int]
   token_ids: list[int]
   finish_reasons: list[int]
   num_free_kv_blocks: int
@@ -190,10 +191,11 @@ class GpuExecutor:
         logits = logits[blen.indptr[1:] - 1]
 
     request_ids = prefill_reqids + decode_reqids
-    token_ids, finish_reasons = [], []
+    indicies, token_ids, finish_reasons = [], [], []
     for i, reqid in enumerate(request_ids):
       reqctx = self.reqctx[reqid]
       next_token_id = reqctx.textgen.get_next_token_id(logits[i])
+      indicies.append(len(reqctx.textgen.output_ids))
       reqctx.textgen.append_token(next_token_id)
       finish = reqctx.textgen.is_finish()
       token_ids.append(next_token_id)
@@ -202,6 +204,7 @@ class GpuExecutor:
         self._del_request(reqid)
     return {
         "request_ids": [x.bytes for x in request_ids],
+        "indicies": indicies,
         "token_ids": token_ids,
         "finish_reasons": finish_reasons,
         "num_free_kv_blocks": self.kvpool.num_free_blocks,

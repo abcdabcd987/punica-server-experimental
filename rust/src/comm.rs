@@ -46,6 +46,7 @@ pub enum FinishReason {
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct TextGenChunk {
     pub request_id: Uuid,
+    pub index: u32,
     pub token_id: u32,
     pub finish_reason: FinishReason,
 }
