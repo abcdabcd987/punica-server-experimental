@@ -1,4 +1,4 @@
-use std::collections::{BTreeSet, HashMap, HashSet};
+use std::collections::{HashMap, HashSet};
 
 use uuid::Uuid;
 
@@ -13,10 +13,6 @@ pub struct Scheduler<R: RunnerStub, Q: RequestStub> {
     gpus: HashMap<Uuid, GpuContext>,
     frontends: HashMap<Uuid, FrontendContext>,
     requests: HashMap<Uuid, RequestContext<Q>>,
-
-    /// (batch_size, gpu_uuid)
-    /// This scheduler always try to use the GPU with the largest batch_size.
-    gpus_accepting_new_requests: BTreeSet<(u32, Uuid)>,
 }
 
 struct GpuContext {
@@ -61,7 +57,6 @@ impl<R: RunnerStub, Q: RequestStub> Scheduler<R, Q> {
             gpus: HashMap::new(),
             frontends: HashMap::new(),
             requests: HashMap::new(),
-            gpus_accepting_new_requests: BTreeSet::new(),
         }
     }
 
@@ -138,7 +133,6 @@ impl<R: RunnerStub, Q: RequestStub> Scheduler<R, Q> {
             PagedKvTracker::new(init.kvpool_capacity, init.kv_block_len);
         gpu.state =
             GpuState::Running(RunningGpu { requests: HashSet::new(), kvpool });
-        self.gpus_accepting_new_requests.insert((0, gpu.gpu_uuid));
         info!(runner_id=%gpu.runner_id, gpu_uuid=%gpu.gpu_uuid, gpu_name=%gpu.devprop.name, "GPU initialized.");
     }
 
@@ -159,10 +153,6 @@ impl<R: RunnerStub, Q: RequestStub> Scheduler<R, Q> {
                 }
             };
             if let GpuState::Running(state) = gpu.state {
-                assert!(
-                    self.gpus_accepting_new_requests
-                        .remove(&(state.requests.len() as u32, gpu.gpu_uuid))
-                );
                 for request_id in state.requests {
                     let reqctx = self.requests.remove(&request_id).unwrap();
                     if let Some(fctx) =
@@ -178,8 +168,33 @@ impl<R: RunnerStub, Q: RequestStub> Scheduler<R, Q> {
         info!(runner_id=%runner_id, addr=%runner.addr(), "Runner removed.");
     }
 
+    fn get_gpu_for_new_request(&mut self, seqlen: u32) -> Option<Uuid> {
+        let mut best = None;
+        for (_, gpu) in self.gpus.iter_mut() {
+            let gpu_state = gpu.state.unwrap_running_mut();
+            if gpu_state.requests.len() as u32 >= gpu.max_batch_size {
+                continue;
+            }
+            let free_blocks = gpu_state.kvpool.num_free_blocks();
+            let new_blocks = gpu_state.kvpool.calc_init_blocks(seqlen);
+            if gpu_state.kvpool.num_free_blocks() < new_blocks {
+                continue;
+            }
+
+            let candidate = (
+                gpu_state.requests.len() as u32,
+                -(free_blocks as i32),
+                gpu.gpu_uuid,
+            );
+            best = best.max(Some(candidate));
+        }
+
+        best.map(|(_, _, gpu_uuid)| gpu_uuid)
+    }
+
     pub fn add_textgen(&mut self, request: Q) -> bool {
-        let (_, gpu_uuid) = match self.gpus_accepting_new_requests.pop_last() {
+        let prompt_len = request.input_ids().len() as u32;
+        let gpu_uuid = match self.get_gpu_for_new_request(prompt_len) {
             Some(v) => v,
             None => {
                 warn!(reqid=%request.id(), "Unable to schedule textgen. No GPU available.");
@@ -192,10 +207,6 @@ impl<R: RunnerStub, Q: RequestStub> Scheduler<R, Q> {
 
         let request_id = request.id();
         gpu_state.requests.insert(request_id);
-        if (gpu_state.requests.len() as u32) < gpu.max_batch_size {
-            self.gpus_accepting_new_requests
-                .insert((gpu_state.requests.len() as u32, gpu.gpu_uuid));
-        }
         debug!(%request_id, %gpu_uuid, gpu_batch_size=%gpu_state.requests.len(), "Add textgen request.");
         runner.run_textgen(comm::RunTextGenCommand {
             gpu_uuid,
@@ -210,9 +221,10 @@ impl<R: RunnerStub, Q: RequestStub> Scheduler<R, Q> {
             .or_insert_with(|| FrontendContext { request_ids: HashSet::new() })
             .request_ids
             .insert(request_id);
-        let len = request.input_ids().len() as u32;
-        self.requests
-            .insert(request_id, RequestContext { request, gpu_uuid, len });
+        self.requests.insert(
+            request_id,
+            RequestContext { request, gpu_uuid, len: prompt_len },
+        );
         true
     }
 
@@ -249,15 +261,7 @@ impl<R: RunnerStub, Q: RequestStub> Scheduler<R, Q> {
                     fctx.request_ids.remove(&chunk.request_id);
                 }
 
-                if (gpu_state.requests.len() as u32) < gpu.max_batch_size {
-                    assert!(self.gpus_accepting_new_requests.remove(&(
-                        gpu_state.requests.len() as u32,
-                        gpu.gpu_uuid
-                    )));
-                }
                 assert!(gpu_state.requests.remove(&chunk.request_id));
-                self.gpus_accepting_new_requests
-                    .insert((gpu_state.requests.len() as u32, gpu.gpu_uuid));
                 self.requests.remove(&chunk.request_id);
                 debug!(request_id=%chunk.request_id, gpu_uuid=%gpu.gpu_uuid, gpu_batch_size=%gpu_state.requests.len(), "Textgen finished.");
 
@@ -300,15 +304,7 @@ impl<R: RunnerStub, Q: RequestStub> Scheduler<R, Q> {
             request_id: msg.request_id,
         });
 
-        if (gpu_state.requests.len() as u32) < gpu.max_batch_size {
-            assert!(
-                self.gpus_accepting_new_requests
-                    .remove(&(gpu_state.requests.len() as u32, gpu.gpu_uuid))
-            );
-        }
         assert!(gpu_state.requests.remove(&msg.request_id));
-        self.gpus_accepting_new_requests
-            .insert((gpu_state.requests.len() as u32, gpu.gpu_uuid));
         debug!(request_id=%msg.request_id, gpu_uuid=%gpu.gpu_uuid, gpu_batch_size=%gpu_state.requests.len(), "Cancel textgen.");
 
         gpu_state.kvpool.release(msg.request_id);
