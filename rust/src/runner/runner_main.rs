@@ -42,7 +42,17 @@ pub async fn runner_main(args: RunnerArgs) -> anyhow::Result<()> {
     for devprop in &devprops {
         let gpu_uuid = devprop.uuid;
         let (mut child, rx, executor) = GpuExecutor::spawn(gpu_uuid)?;
-        wait_executors.spawn(async move { (gpu_uuid, child.wait().await) });
+        let ct = ct.clone();
+        wait_executors.spawn(async move {
+            tokio::select! {
+                _ = ct.cancelled() => {
+                    info!(%gpu_uuid, "Killing GpuExecutor.");
+                    child.kill().await.unwrap();
+                    (gpu_uuid, child.wait().await)
+                }
+                r = child.wait() => (gpu_uuid, r)
+            }
+        });
         gpu_executors.push((rx, executor));
     }
 

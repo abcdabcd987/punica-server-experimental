@@ -36,13 +36,20 @@ pub async fn loadgen_main(args: LoadGenArgs) -> anyhow::Result<()> {
     let scheduler_client = conn.get_client();
     let conn = tokio::spawn(async move { conn.serve().await });
 
-    loadgen(trace, scheduler_client).await;
-    info!("LoadGen finished. Shutting down...");
+    let ec = tokio::select! {
+        _ = conn => {
+            Err(anyhow::anyhow!("Scheduler connection closed unexpectedly."))
+        }
+        _ = loadgen(trace, scheduler_client) => {
+            info!("LoadGen finished. Shutting down...");
+            Ok(())
+        }
+    };
+
     ct.cancel();
-    conn.await.unwrap();
     let _ = shutdown_complete_rx.recv().await;
 
-    Ok(())
+    ec
 }
 
 #[derive(Clone)]

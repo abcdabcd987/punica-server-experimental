@@ -128,6 +128,8 @@ def main():
     except KeyboardInterrupt:
       sigint = True
       break
+    if not line:
+      continue
     split = line.split(" ")
     elapsed = float(split[0])
     reqidx = int(split[1])
@@ -139,9 +141,11 @@ def main():
       break
   pbar.close()
   popen.terminate()
-  popen.wait()
-  if sigint:
-    exit(1)
+  ec = popen.wait()
+  if ec == 0 and sigint:
+    ec = 1
+  if ec != 0:
+    exit(ec)
 
 
 if __name__ == "__main__":
