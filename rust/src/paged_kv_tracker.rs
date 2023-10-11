@@ -69,4 +69,9 @@ impl PagedKvTracker {
             self.requests.remove(&request_id).expect("Request ID not found");
         self.free_blocks += ctx.num_pages;
     }
+
+    pub fn request_len(&self, request_id: &Uuid) -> u32 {
+        let ctx = self.requests.get(request_id).expect("Request ID not found");
+        (ctx.num_pages - 1) * self.block_len + ctx.last_page_len
+    }
 }

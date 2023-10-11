@@ -76,14 +76,15 @@ impl<R: RunnerStub, Q: RequestStub> Scheduler<R, Q> {
 
             let sizeof = 2;
             let block_len = 16;
-            let mut mem = (prop.total_memory as f32 * 0.8) as i64;
+            let mut mem = runner
+                .limit_gpumem()
+                .unwrap_or((prop.total_memory as f32 * 0.8) as u64)
+                as i64;
             mem -= (self.model_config.total_params() * sizeof) as i64;
             let block_size =
                 self.model_config.token_kvcache_size() * block_len * sizeof;
             let kvpool_capacity = mem / block_size as i64;
-            let maxlen = 2048;
-            let max_batch_size = kvpool_capacity / (maxlen / block_len) as i64;
-            if max_batch_size <= 0 {
+            if kvpool_capacity <= 0 {
                 error!(gpu_uuid=%prop.uuid, gpu_name=%prop.name, gpu_total_memory=%prop.total_memory, "Not enough memory. Skip.");
                 self.gpus.insert(
                     prop.uuid,
@@ -97,7 +98,7 @@ impl<R: RunnerStub, Q: RequestStub> Scheduler<R, Q> {
                 );
                 continue;
             }
-            let max_batch_size = u32::min(max_batch_size as u32, 32);
+            let max_batch_size = 32;
             self.gpus.insert(
                 prop.uuid,
                 GpuContext {
@@ -168,10 +169,17 @@ impl<R: RunnerStub, Q: RequestStub> Scheduler<R, Q> {
         info!(runner_id=%runner_id, addr=%runner.addr(), "Runner removed.");
     }
 
-    fn get_gpu_for_new_request(&mut self, seqlen: u32) -> Option<Uuid> {
+    fn get_gpu_for_new_request(
+        &self,
+        seqlen: u32,
+        ignore: Option<Uuid>,
+    ) -> Option<Uuid> {
         let mut best = None;
-        for (_, gpu) in self.gpus.iter_mut() {
-            let gpu_state = gpu.state.unwrap_running_mut();
+        for (gpu_uuid, gpu) in self.gpus.iter() {
+            if ignore == Some(*gpu_uuid) {
+                continue;
+            }
+            let gpu_state = gpu.state.unwrap_running();
             if gpu_state.requests.len() as u32 >= gpu.max_batch_size {
                 continue;
             }
@@ -184,7 +192,7 @@ impl<R: RunnerStub, Q: RequestStub> Scheduler<R, Q> {
             let candidate = (
                 gpu_state.requests.len() as u32,
                 -(free_blocks as i32),
-                gpu.gpu_uuid,
+                *gpu_uuid,
             );
             best = best.max(Some(candidate));
         }
@@ -194,7 +202,7 @@ impl<R: RunnerStub, Q: RequestStub> Scheduler<R, Q> {
 
     pub fn add_textgen(&mut self, request: Q) -> bool {
         let prompt_len = request.input_ids().len() as u32;
-        let gpu_uuid = match self.get_gpu_for_new_request(prompt_len) {
+        let gpu_uuid = match self.get_gpu_for_new_request(prompt_len, None) {
             Some(v) => v,
             None => {
                 warn!(reqid=%request.id(), "Unable to schedule textgen. No GPU available.");
@@ -241,13 +249,18 @@ impl<R: RunnerStub, Q: RequestStub> Scheduler<R, Q> {
                 }
             };
 
-            if reqctx.len != reqctx.request.input_ids().len() as u32 {
-                gpu_state.kvpool.append_token(&chunk.request_id);
-            }
-
             if chunk.index != reqctx.len {
                 warn!(request_id=%chunk.request_id, expected_index=reqctx.len, chunk_index=chunk.index, "Chunk index mismatch. Ignore this chunk.");
                 continue;
+            }
+
+            if msg.gpu_uuid != reqctx.gpu_uuid {
+                warn!(request_id=%chunk.request_id, expected_gpu_uuid=%reqctx.gpu_uuid, chunk_gpu_uuid=%msg.gpu_uuid, "GPU UUID mismatch. Ignore this chunk.");
+                continue;
+            }
+
+            if reqctx.len != reqctx.request.input_ids().len() as u32 {
+                gpu_state.kvpool.append_token(&chunk.request_id);
             }
             reqctx.request.add_chunk(chunk.token_id, chunk.finish_reason);
             reqctx.len += 1;
@@ -265,6 +278,18 @@ impl<R: RunnerStub, Q: RequestStub> Scheduler<R, Q> {
 
                 gpu_state.kvpool.release(chunk.request_id);
             }
+        }
+
+        let mut migrate = gpu_state.kvpool.num_free_blocks()
+            < gpu_state.requests.len() as u32;
+        let mut ok = true;
+        while migrate && ok {
+            ok = self.migrate_request(msg.gpu_uuid);
+
+            let gpu = self.gpus.get_mut(&msg.gpu_uuid).unwrap();
+            let gpu_state = gpu.state.unwrap_running_mut();
+            migrate = gpu_state.kvpool.num_free_blocks()
+                < gpu_state.requests.len() as u32;
         }
     }
 
@@ -325,9 +350,84 @@ impl<R: RunnerStub, Q: RequestStub> Scheduler<R, Q> {
             );
         }
     }
+
+    fn migrate_request(&mut self, src_gpu_uuid: Uuid) -> bool {
+        let src_gpu = self.gpus.get_mut(&src_gpu_uuid).unwrap();
+        let src_gpu_state = src_gpu.state.unwrap_running_mut();
+        let src_runner_id = src_gpu.runner_id;
+
+        // Find a request to migrate.
+        let mut request_id = None;
+        for reqid in src_gpu_state.requests.iter() {
+            let reqctx = self.requests.get_mut(reqid).unwrap();
+            let candidate = (-(reqctx.len as i32), reqctx.request.id());
+            request_id = request_id.max(Some(candidate));
+        }
+        let request_id = match request_id {
+            Some((_, reqid)) => reqid,
+            None => {
+                error!(%src_gpu_uuid, "No request to migrate.");
+                return false;
+            }
+        };
+        let reqlen = self.requests.get(&request_id).unwrap().len;
+
+        // Find a GPU to migrate the request to.
+        let dst_gpu_uuid = match self
+            .get_gpu_for_new_request(reqlen, Some(src_gpu_uuid))
+        {
+            Some(v) => v,
+            None => {
+                error!(%request_id, "Cannot find an available GPU to migrate the request to.");
+                return false;
+            }
+        };
+
+        // Update request context
+        let reqctx = self.requests.get_mut(&request_id).unwrap();
+        reqctx.gpu_uuid = dst_gpu_uuid;
+        reqctx.request.migrate();
+        assert_eq!(reqlen, reqctx.request.input_ids().len() as u32);
+
+        // Cancel the request on the source GPU.
+        let src_gpu = self.gpus.get_mut(&src_gpu_uuid).unwrap();
+        let src_gpu_state = src_gpu.state.unwrap_running_mut();
+        assert!(src_gpu_state.requests.remove(&request_id));
+        src_gpu_state.kvpool.release(request_id);
+        let src_runner = self.runners.get(&src_runner_id).unwrap();
+        src_runner.cancel_textgen(comm::CancelTextGenCommand {
+            gpu_uuid: src_gpu_uuid,
+            request_id,
+        });
+
+        // Add the request to the destination GPU.
+        let dst_gpu = self.gpus.get_mut(&dst_gpu_uuid).unwrap();
+        let dst_gpu_state = dst_gpu.state.unwrap_running_mut();
+        dst_gpu_state.requests.insert(request_id);
+        assert!(dst_gpu_state.kvpool.init(request_id, reqlen));
+        let dst_runner = self.runners.get(&dst_gpu.runner_id).unwrap();
+        dst_runner.run_textgen(comm::RunTextGenCommand {
+            gpu_uuid: dst_gpu_uuid,
+            req: comm::TextGenRequest {
+                request_id,
+                input_ids: reqctx.request.input_ids().to_vec(),
+                gencfg: reqctx.request.generation_config().clone(),
+            },
+        });
+
+        info!(%src_gpu_uuid, %request_id, %dst_gpu_uuid, "Migrated request.");
+        true
+    }
 }
 
 impl GpuState {
+    fn unwrap_running(&self) -> &RunningGpu {
+        match self {
+            GpuState::Running(v) => v,
+            _ => panic!("Invalid state."),
+        }
+    }
+
     fn unwrap_running_mut(&mut self) -> &mut RunningGpu {
         match self {
             GpuState::Running(v) => v,

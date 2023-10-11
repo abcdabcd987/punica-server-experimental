@@ -9,6 +9,7 @@ pub trait RunnerStub {
     fn id(&self) -> Uuid;
     fn device_props(&self) -> &[comm::CudaDeviceProp];
     fn addr(&self) -> SocketAddr;
+    fn limit_gpumem(&self) -> Option<u64>;
 
     // Commands
     fn init_gpu(&self, msg: comm::AcquireGpuCommand);
@@ -27,4 +28,5 @@ pub trait RequestStub {
 
     // Commands
     fn add_chunk(&mut self, token_id: u32, finish: comm::FinishReason);
+    fn migrate(&mut self);
 }

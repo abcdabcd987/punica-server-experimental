@@ -24,6 +24,7 @@ pub struct RunnerDelegate {
     runner_id: Uuid,
     addr: SocketAddr,
     devprops: Vec<comm::CudaDeviceProp>,
+    limit_gpumem: Option<u64>,
     tx: mpsc::UnboundedSender<Message>,
 }
 
@@ -38,6 +39,10 @@ impl RunnerStub for RunnerDelegate {
 
     fn addr(&self) -> SocketAddr {
         self.addr
+    }
+
+    fn limit_gpumem(&self) -> Option<u64> {
+        self.limit_gpumem
     }
 
     fn init_gpu(&self, msg: comm::AcquireGpuCommand) {
@@ -112,6 +117,10 @@ impl RequestStub for Request {
         if let Err(e) = self.tx.send(msg) {
             error!(request_id=%self.id, cause=%e, "Failed to send message to frontend.");
         }
+    }
+
+    fn migrate(&mut self) {
+        self.prompt_len = self.tokens.len() as u32;
     }
 }
 
@@ -354,6 +363,7 @@ impl Connection {
                     runner_id: m.runner_id,
                     addr: self.addr,
                     devprops: m.devices,
+                    limit_gpumem: m.limit_gpumem,
                     tx: self.ch_send.clone(),
                 };
                 self.scheduler.lock().unwrap().add_runner(runner);

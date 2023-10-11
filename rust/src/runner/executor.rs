@@ -378,6 +378,8 @@ impl BackToBackSchedule {
             self.kvpool.release(*reqid);
             unfinished.prefill.remove(reqid);
             unfinished.decode.remove(reqid);
+
+            info!(%reqid, gpu_uuid=%self.gpu_uuid, "Cancelled request.");
         }
         unfinished.cancel.clear();
         Ok(true)
@@ -397,17 +399,18 @@ impl BackToBackSchedule {
                 self.kvpool.calc_init_blocks(input_ids.len() as u32);
         }
         if new_kv_blocks > self.kvpool.num_free_blocks() {
+            error!(gpu_uuid=%self.gpu_uuid, num_new_requests=unfinished.enqueue.len(), new_kv_blocks, free_kv_blocks=self.kvpool.num_free_blocks(), "Cannot enqueue new requests. Not enough free blocks.");
             return Ok(false);
         }
 
         // Do enqueue
-        let mut reqids = Vec::with_capacity(unfinished.enqueue.len());
         for (reqid, input_ids, gencfg) in &unfinished.enqueue {
-            assert!(self.kvpool.init(*reqid, input_ids.len() as u32));
+            let prompt_len = input_ids.len() as u32;
+            assert!(self.kvpool.init(*reqid, prompt_len));
             self.subprocess.add_request(*reqid, input_ids, gencfg).await?;
-            reqids.push(*reqid);
+            unfinished.prefill.insert(*reqid);
+            info!(%reqid, gpu_uuid=%self.gpu_uuid, prompt_len, gpu_batch_size=unfinished.decode.len(), num_free_kv_blocks=self.kvpool.num_free_blocks(), "Added request.");
         }
-        unfinished.prefill.extend(reqids);
         unfinished.enqueue.clear();
         Ok(true)
     }
@@ -420,6 +423,7 @@ impl BackToBackSchedule {
 
         // Don't step if not enough free blocks. Being conservative here.
         if self.kvpool.num_free_blocks() < unfinished.decode.len() as u32 {
+            warn!(gpu_uuid=%self.gpu_uuid, free_kv_blocks=self.kvpool.num_free_blocks(), num_decode_requests=unfinished.decode.len(), "Cannot step. Not enough free blocks.");
             return Ok(false);
         }
 
@@ -460,9 +464,12 @@ impl BackToBackSchedule {
         ) {
             if finish != comm::FinishReason::NotFinished {
                 assert!(unfinished.decode.remove(&reqid));
+                let seqlen = self.kvpool.request_len(&reqid);
 
                 // Track KvCache usage: finish
                 self.kvpool.release(reqid);
+
+                info!(%reqid, seqlen, gpu_uuid=%self.gpu_uuid, gpu_batch_size=unfinished.decode.len(), num_free_kv_blocks=self.kvpool.num_free_blocks(), "Finished request.");
             }
             chunks.push(comm::TextGenChunk {
                 request_id: reqid,
