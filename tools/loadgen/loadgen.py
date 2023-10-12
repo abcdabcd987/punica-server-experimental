@@ -59,8 +59,8 @@ class TraceSpec:
     requests = []
     while t < self.duration:
       gap = gap_dist.rvs(random_state=gap_rng)
-      prompt_len = int(prompt_dist.rvs(random_state=req_rng))
-      output_len = int(output_dist.rvs(random_state=req_rng))
+      prompt_len = max(int(prompt_dist.rvs(random_state=req_rng)), 2)
+      output_len = max(int(output_dist.rvs(random_state=req_rng)), 2)
       requests.append(RequestSpec(gap, prompt_len, output_len))
       t += gap
     return requests

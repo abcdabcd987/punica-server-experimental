@@ -379,7 +379,7 @@ impl BackToBackSchedule {
             unfinished.prefill.remove(reqid);
             unfinished.decode.remove(reqid);
 
-            info!(%reqid, gpu_uuid=%self.gpu_uuid, "Cancelled request.");
+            debug!(%reqid, gpu_uuid=%self.gpu_uuid, "Cancelled request.");
         }
         unfinished.cancel.clear();
         Ok(true)
@@ -409,7 +409,7 @@ impl BackToBackSchedule {
             assert!(self.kvpool.init(*reqid, prompt_len));
             self.subprocess.add_request(*reqid, input_ids, gencfg).await?;
             unfinished.prefill.insert(*reqid);
-            info!(%reqid, gpu_uuid=%self.gpu_uuid, prompt_len, gpu_batch_size=unfinished.decode.len(), num_free_kv_blocks=self.kvpool.num_free_blocks(), "Added request.");
+            debug!(%reqid, gpu_uuid=%self.gpu_uuid, prompt_len, gpu_batch_size=unfinished.decode.len(), num_free_kv_blocks=self.kvpool.num_free_blocks(), "Added request.");
         }
         unfinished.enqueue.clear();
         Ok(true)
@@ -469,7 +469,7 @@ impl BackToBackSchedule {
                 // Track KvCache usage: finish
                 self.kvpool.release(reqid);
 
-                info!(%reqid, seqlen, gpu_uuid=%self.gpu_uuid, gpu_batch_size=unfinished.decode.len(), num_free_kv_blocks=self.kvpool.num_free_blocks(), "Finished request.");
+                debug!(%reqid, seqlen, gpu_uuid=%self.gpu_uuid, gpu_batch_size=unfinished.decode.len(), num_free_kv_blocks=self.kvpool.num_free_blocks(), "Finished request.");
             }
             chunks.push(comm::TextGenChunk {
                 request_id: reqid,
