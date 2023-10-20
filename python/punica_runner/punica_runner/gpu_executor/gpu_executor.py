@@ -170,8 +170,12 @@ class GpuExecutor:
     # Load lora model
     if len(self.lora_models) == self.lora_cache_size:
       self.lora_models.popitem(last=False)
-    self.lora_models[lora_id] = LlamaLoraWeight(self.model.config,
-                                                self.lora_rank, self.dtype)
+    self.lora_models[lora_id] = LlamaLoraWeight(
+        self.model.config,
+        self.lora_rank,
+        self.dtype,
+        self.device,
+    )
     # TODO: actually load lora model asynchronously
     # NOTE: currently just uninitialized
 

@@ -179,7 +179,11 @@ impl<R: RunnerStub, Q: RequestStub> Scheduler<R, Q> {
         info!(runner_id=%runner_id, addr=%runner.addr(), "Runner removed.");
     }
 
-    fn get_gpu_for_new_request(&self, seqlen: u32) -> Option<Uuid> {
+    fn get_gpu_for_new_request(
+        &self,
+        seqlen: u32,
+        lora_id: Uuid,
+    ) -> Option<Uuid> {
         let mut best = None;
         for (gpu_uuid, gpu) in self.gpus.iter() {
             let gpu_state = gpu.state.unwrap_running();
@@ -193,15 +197,25 @@ impl<R: RunnerStub, Q: RequestStub> Scheduler<R, Q> {
                 continue;
             }
 
+            let lora_cnt = gpu_state
+                .requests
+                .iter()
+                .filter(|request_id| {
+                    let reqctx = self.requests.get(request_id).unwrap();
+                    reqctx.request.lora_id() == lora_id
+                })
+                .count();
+
             let candidate = (
                 gpu_state.requests.len() as u32,
+                lora_cnt,
                 -(free_blocks as i32),
                 *gpu_uuid,
             );
             best = best.max(Some(candidate));
         }
 
-        best.map(|(_, _, gpu_uuid)| gpu_uuid)
+        best.map(|(_, _, _, gpu_uuid)| gpu_uuid)
     }
 
     fn schedule_queued_requests(&mut self) -> HashMap<Uuid, Uuid> {
@@ -212,7 +226,10 @@ impl<R: RunnerStub, Q: RequestStub> Scheduler<R, Q> {
         {
             let reqctx = self.requests.get_mut(&request_id).unwrap();
             let prompt_len = reqctx.request.input_ids().len() as u32;
-            let gpu_uuid = match self.get_gpu_for_new_request(prompt_len) {
+            let lora_id = reqctx.request.lora_id();
+            let gpu_uuid = match self
+                .get_gpu_for_new_request(prompt_len, lora_id)
+            {
                 Some(v) => v,
                 None => {
                     self.queued_requests.insert((added_at_nanos, request_id));
