@@ -20,6 +20,7 @@ pub trait RunnerStub {
 pub trait RequestStub {
     // Properties
     fn id(&self) -> Uuid;
+    fn lora_id(&self) -> Uuid;
     fn input_ids(&self) -> &[u32];
     fn generation_config(&self) -> &comm::GenerationConfig;
     fn tokens(&self) -> &[u32];

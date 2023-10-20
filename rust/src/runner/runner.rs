@@ -16,7 +16,6 @@ struct Gpu {
 
 pub struct Runner {
     model_path: PathBuf,
-    use_fake_executor: bool,
     limit_gpumem: Option<u64>,
 
     uuid: Uuid,
@@ -27,7 +26,6 @@ pub struct Runner {
 impl Runner {
     pub fn new(
         model_path: PathBuf,
-        use_fake_executor: bool,
         limit_gpumem_gb: Option<u64>,
         devprops: Vec<comm::CudaDeviceProp>,
         gpu_executors: Vec<(
@@ -44,7 +42,6 @@ impl Runner {
         }
         Ok(Self {
             model_path,
-            use_fake_executor,
             limit_gpumem: limit_gpumem_gb.map(|gb| gb * 1024 * 1024 * 1024),
             uuid,
             gpus,
@@ -78,18 +75,16 @@ impl Runner {
         msg: &comm::AcquireGpuCommand,
     ) -> anyhow::Result<()> {
         let mut gpu = self.gpus.get_mut(&msg.gpu_uuid).unwrap();
-        if self.use_fake_executor {
-            gpu.executor.init_fake().await?;
-        } else {
-            gpu.executor
-                .init(
-                    &self.model_path.display().to_string(),
-                    &msg.dtype,
-                    msg.block_len,
-                    msg.kvpool_capacity,
-                )
-                .await?;
-        }
+        gpu.executor
+            .init(
+                &self.model_path.display().to_string(),
+                &msg.dtype,
+                msg.block_len,
+                msg.kvpool_capacity,
+                msg.lora_cache_size,
+                msg.lora_rank,
+            )
+            .await?;
 
         let mut gpu_rx = gpu.rx.take().unwrap();
         let scheduler_tx = self.scheduler_tx.clone();
@@ -142,7 +137,12 @@ impl Runner {
     ) -> anyhow::Result<()> {
         let mut gpu = self.gpus.get_mut(&msg.gpu_uuid).unwrap();
         gpu.executor
-            .add_request(msg.req.request_id, msg.req.input_ids, msg.req.gencfg)
+            .add_request(
+                msg.req.request_id,
+                msg.req.lora_id,
+                msg.req.input_ids,
+                msg.req.gencfg,
+            )
             .await;
 
         Ok(())

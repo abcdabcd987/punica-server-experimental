@@ -136,7 +136,8 @@ async fn loadgen_request(
     };
     let (tx, mut rx) = mpsc::unbounded_channel();
 
-    scheduler.add_textgen(reqid, input_ids, gencfg, tx);
+    let lora_id = Uuid::default();
+    scheduler.add_textgen(reqid, lora_id, input_ids, gencfg, tx);
 
     let mut cnt = 0;
     while let Some(_chunk) = rx.recv().await {

@@ -87,7 +87,8 @@ async fn textgen_handler(
     let mut output_ids = input_ids.clone();
     let mut prefix_offset = 0;
     let mut read_offset = input_ids.len();
-    ctx.scheduler.add_textgen(reqid, input_ids, gencfg, tx);
+    let lora_id = Uuid::default();
+    ctx.scheduler.add_textgen(reqid, lora_id, input_ids, gencfg, tx);
 
     struct DisconnectGuard {
         scheduler: SchedulerClient,

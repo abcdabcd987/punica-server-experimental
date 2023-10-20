@@ -26,11 +26,12 @@ enum Request<'a> {
 
 #[derive(Serialize, Debug)]
 struct Init<'a> {
-    use_fake: bool,
     model_path: &'a str,
     dtype_str: &'a str,
     block_len: u32,
     kvpool_capacity: u32,
+    lora_cache_size: u32,
+    lora_rank: u32,
 }
 
 #[derive(Serialize, Debug)]
@@ -39,6 +40,7 @@ struct Shutdown {}
 #[derive(Serialize, Debug)]
 struct AddRequest<'a> {
     reqid: Uuid,
+    lora_id: Uuid,
     input_ids: &'a [u32],
     gencfg: &'a comm::GenerationConfig,
 }
@@ -105,26 +107,16 @@ impl ExecutorSubprocess {
         dtype_str: &str,
         block_len: u32,
         kvpool_capacity: u32,
+        lora_cache_size: u32,
+        lora_rank: u32,
     ) -> anyhow::Result<()> {
         let init = Request::Init(Init {
-            use_fake: false,
             model_path,
             dtype_str,
             block_len,
             kvpool_capacity,
-        });
-        self.write_msg(&init).await?;
-        self.read_msg::<i32>().await?;
-        Ok(())
-    }
-
-    pub async fn init_fake(&mut self) -> anyhow::Result<()> {
-        let init = Request::Init(Init {
-            use_fake: true,
-            model_path: "",
-            dtype_str: "",
-            block_len: 0,
-            kvpool_capacity: 0,
+            lora_cache_size,
+            lora_rank,
         });
         self.write_msg(&init).await?;
         self.read_msg::<i32>().await?;
@@ -139,11 +131,16 @@ impl ExecutorSubprocess {
     pub async fn add_request(
         &mut self,
         reqid: Uuid,
+        lora_id: Uuid,
         input_ids: &[u32],
         gencfg: &comm::GenerationConfig,
     ) -> anyhow::Result<()> {
-        let add_request =
-            Request::AddRequest(AddRequest { reqid, input_ids, gencfg });
+        let add_request = Request::AddRequest(AddRequest {
+            reqid,
+            lora_id,
+            input_ids,
+            gencfg,
+        });
         self.write_msg(&add_request).await?;
         self.read_msg::<i32>().await?;
         Ok(())
@@ -169,7 +166,7 @@ impl ExecutorSubprocess {
 struct UnfinishedRequests {
     // Accessible by both the main thread and the back-to-back schedule thread.
     cancel: HashSet<Uuid>,
-    enqueue: Vec<(Uuid, Vec<u32>, comm::GenerationConfig)>,
+    enqueue: Vec<(Uuid, Uuid, Vec<u32>, comm::GenerationConfig)>,
 
     // Only accessible by the back-to-back schedule thread.
     prefill: HashSet<Uuid>,
@@ -277,19 +274,21 @@ impl GpuExecutor {
         dtype_str: &str,
         block_len: u32,
         kvpool_capacity: u32,
+        lora_cache_size: u32,
+        lora_rank: u32,
     ) -> anyhow::Result<()> {
         self.unwrap_spawned_mut()
             .subprocess
-            .init(model_path, dtype_str, block_len, kvpool_capacity)
+            .init(
+                model_path,
+                dtype_str,
+                block_len,
+                kvpool_capacity,
+                lora_cache_size,
+                lora_rank,
+            )
             .await?;
         let kvpool = PagedKvTracker::new(kvpool_capacity, block_len);
-        self.start_back_to_back_schedule(kvpool);
-        Ok(())
-    }
-
-    pub async fn init_fake(&mut self) -> anyhow::Result<()> {
-        self.unwrap_spawned_mut().subprocess.init_fake().await?;
-        let kvpool = PagedKvTracker::new(1000, 16);
         self.start_back_to_back_schedule(kvpool);
         Ok(())
     }
@@ -308,10 +307,15 @@ impl GpuExecutor {
     pub async fn add_request(
         &mut self,
         reqid: Uuid,
+        lora_id: Uuid,
         input_ids: Vec<u32>,
         gencfg: comm::GenerationConfig,
     ) {
-        self.unfinished.lock().await.enqueue.push((reqid, input_ids, gencfg));
+        self.unfinished
+            .lock()
+            .await
+            .enqueue
+            .push((reqid, lora_id, input_ids, gencfg));
         self.unwrap_bh_mut().notify_new_task.notify_one();
     }
 
@@ -394,7 +398,7 @@ impl BackToBackSchedule {
 
         // Don't enqueue if not enough free blocks
         let mut new_kv_blocks = 0;
-        for (_reqid, input_ids, _gencfg) in &unfinished.enqueue {
+        for (_reqid, _lora_id, input_ids, _gencfg) in &unfinished.enqueue {
             new_kv_blocks +=
                 self.kvpool.calc_init_blocks(input_ids.len() as u32);
         }
@@ -404,10 +408,12 @@ impl BackToBackSchedule {
         }
 
         // Do enqueue
-        for (reqid, input_ids, gencfg) in &unfinished.enqueue {
+        for (reqid, lora_id, input_ids, gencfg) in &unfinished.enqueue {
             let prompt_len = input_ids.len() as u32;
             assert!(self.kvpool.init(*reqid, prompt_len));
-            self.subprocess.add_request(*reqid, input_ids, gencfg).await?;
+            self.subprocess
+                .add_request(*reqid, *lora_id, input_ids, gencfg)
+                .await?;
             unfinished.prefill.insert(*reqid);
             debug!(%reqid, gpu_uuid=%self.gpu_uuid, prompt_len, gpu_batch_size=unfinished.decode.len(), num_free_kv_blocks=self.kvpool.num_free_blocks(), "Added request.");
         }

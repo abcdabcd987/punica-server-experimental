@@ -28,6 +28,7 @@ pub struct GenerationConfig {
 #[derive(Serialize, Deserialize, Debug)]
 pub struct TextGenRequest {
     pub request_id: Uuid,
+    pub lora_id: Uuid,
     pub input_ids: Vec<u32>,
     pub gencfg: GenerationConfig,
 }
@@ -93,6 +94,8 @@ pub struct AcquireGpuCommand {
     pub dtype: String,
     pub block_len: u32,
     pub kvpool_capacity: u32,
+    pub lora_cache_size: u32,
+    pub lora_rank: u32,
 }
 #[derive(Serialize, Deserialize, Debug)]
 pub struct AcquireGpuResponse {

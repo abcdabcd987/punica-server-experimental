@@ -34,6 +34,24 @@ impl LlamaModelConfig {
         let k = (self.num_kv_heads * self.head_dim) as u64;
         k * self.num_layers as u64 * 2
     }
+
+    pub const fn lora_params(&self, r: u32) -> u64 {
+        let q = lora_params(self.hidden_dim, self.num_heads * self.head_dim, r);
+        let k =
+            lora_params(self.hidden_dim, self.num_kv_heads * self.head_dim, r);
+        let v = k;
+        let o = q;
+        let gate = lora_params(self.hidden_dim, self.intermediate_size, r);
+        let up = gate;
+        let down = gate;
+        let layer = q + k + v + o + gate + up + down;
+
+        layer * self.num_layers as u64
+    }
+}
+
+const fn lora_params(d_in: u32, d_out: u32, r: u32) -> u64 {
+    (d_in + d_out) as u64 * r as u64
 }
 
 pub const LLAMA_7B: LlamaModelConfig = LlamaModelConfig {

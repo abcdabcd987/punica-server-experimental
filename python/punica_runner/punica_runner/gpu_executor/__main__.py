@@ -16,7 +16,6 @@ import traceback
 import uuid
 
 import msgpack
-from punica_runner.gpu_executor.gpu_executor import FakeGpuExecutor
 from punica_runner.gpu_executor.gpu_executor import GpuExecutor
 
 stdin = os.fdopen(sys.stdin.fileno(), "rb")
@@ -40,21 +39,21 @@ def write_msg(obj):
 
 def handle_init(msg):
   global exe
-  if msg["use_fake"]:
-    exe = FakeGpuExecutor()
-  else:
-    exe = GpuExecutor(
-        model_path=msg["model_path"],
-        dtype_str=msg["dtype_str"],
-        block_len=msg["block_len"],
-        kvpool_capacity=msg["kvpool_capacity"],
-    )
+  exe = GpuExecutor(
+      model_path=msg["model_path"],
+      dtype_str=msg["dtype_str"],
+      block_len=msg["block_len"],
+      kvpool_capacity=msg["kvpool_capacity"],
+      lora_cache_size=msg["lora_cache_size"],
+      lora_rank=msg["lora_rank"],
+  )
   return 0
 
 
 def handle_add_request(msg):
   exe.add_request(
       reqid=uuid.UUID(bytes=msg["reqid"]),
+      lora_id=uuid.UUID(bytes=msg["lora_id"]),
       input_ids=msg["input_ids"],
       gencfg=msg["gencfg"],
   )

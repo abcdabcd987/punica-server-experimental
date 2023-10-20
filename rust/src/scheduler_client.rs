@@ -28,13 +28,14 @@ impl SchedulerClient {
     pub fn add_textgen(
         &self,
         request_id: Uuid,
+        lora_id: Uuid,
         input_ids: Vec<u32>,
         gencfg: comm::GenerationConfig,
         chunk_tx: mpsc::UnboundedSender<comm::TextGenChunk>,
     ) {
         self.requests.insert(request_id, RequestContext { chunk_tx });
         self.send(&comm::FrontendToSchedulerMessage::TextGenRequest(
-            comm::TextGenRequest { request_id, input_ids, gencfg },
+            comm::TextGenRequest { request_id, lora_id, input_ids, gencfg },
         ));
     }
 

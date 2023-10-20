@@ -10,8 +10,6 @@ use crate::tokenizer::Tokenizer;
 #[derive(Debug, clap::Args)]
 pub struct DebugExecutorArgs {
     #[arg(long)]
-    pub fake: bool,
-    #[arg(long)]
     pub model_path: PathBuf,
     #[arg(long, default_value_t = 0)]
     pub gpu_index: usize,
@@ -28,13 +26,9 @@ pub async fn debug_executor_main(
         "How to dial in an espresso shot? Please don't use emoji.",
     ];
 
-    let gpu_uuid = if args.fake {
-        Uuid::now_v7()
-    } else {
-        let devprops = device_query()?;
-        info!(gpu=?devprops[args.gpu_index]);
-        devprops[args.gpu_index].uuid
-    };
+    let devprops = device_query()?;
+    info!(gpu=?devprops[args.gpu_index]);
+    let gpu_uuid = devprops[args.gpu_index].uuid;
 
     let tokenizer = Tokenizer::new(&args.model_path)?;
     info!("Tokenizer loaded.");
@@ -49,20 +43,17 @@ pub async fn debug_executor_main(
     });
     info!("Executor spawned.");
 
-    if args.fake {
-        executor.init_fake().await?;
-        info!("FakeGpuExecutor initialized.");
-    } else {
-        executor
-            .init(
-                &args.model_path.display().to_string(),
-                "float16",
-                16,
-                (1024 * questions.len() / 16) as u32,
-            )
-            .await?;
-        info!("GpuExecutor initialized.");
-    }
+    executor
+        .init(
+            &args.model_path.display().to_string(),
+            "float16",
+            16,
+            (1024 * questions.len() / 16) as u32,
+            questions.len() as u32,
+            16,
+        )
+        .await?;
+    info!("GpuExecutor initialized.");
 
     let mut reqids = Vec::new();
     let mut output_ids = Vec::new();
@@ -71,10 +62,12 @@ pub async fn debug_executor_main(
         let input_ids = tokenizer.encode(&prompt)?;
         output_ids.push(input_ids);
         let reqid = Uuid::now_v7();
+        let lora_id = Uuid::from_u64_pair(0xabcdabcd987, idx as u64);
         reqids.push(reqid);
         executor
             .add_request(
                 reqid,
+                lora_id,
                 output_ids.last().unwrap(),
                 &comm::GenerationConfig {
                     min_tokens: 0,

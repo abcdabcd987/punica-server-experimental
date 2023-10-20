@@ -68,6 +68,7 @@ impl RunnerDelegate {
 
 pub struct Request {
     id: Uuid,
+    lora_id: Uuid,
     prompt_len: u32,
     tokens: Vec<u32>,
     generation_config: comm::GenerationConfig,
@@ -78,6 +79,10 @@ pub struct Request {
 impl RequestStub for Request {
     fn id(&self) -> Uuid {
         self.id
+    }
+
+    fn lora_id(&self) -> Uuid {
+        self.lora_id
     }
 
     fn input_ids(&self) -> &[u32] {
@@ -393,6 +398,7 @@ impl Connection {
             TextGenRequest(m) => {
                 let req = Request {
                     id: m.request_id,
+                    lora_id: m.lora_id,
                     prompt_len: m.input_ids.len() as u32,
                     tokens: m.input_ids,
                     generation_config: m.gencfg,

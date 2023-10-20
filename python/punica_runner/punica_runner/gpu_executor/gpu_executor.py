@@ -1,11 +1,13 @@
 import dataclasses
 import enum
+import collections
 import gc
+from typing import TypedDict, OrderedDict
 import uuid
-from typing import TypedDict
 
-import numpy as np
-from punica.models.llama import LlamaForCausalLM
+from punica.models.llama_lora import BatchedLlamaLoraWeight
+from punica.models.llama_lora import LlamaForCausalLMWithLora
+from punica.models.llama_lora import LlamaLoraWeight
 from punica.utils import BatchedKvCache
 from punica.utils import BatchLenInfo
 from punica.utils import KvCache
@@ -102,8 +104,12 @@ class GenerationContext:
 @dataclasses.dataclass
 class RequestContext:
   reqid: uuid.UUID
+  lora_id: uuid.UUID
   textgen: GenerationContext
   kvcache: KvCache
+
+  def is_prefill(self) -> bool:
+    return len(self.textgen.output_ids) == self.textgen.prompt_len
 
 
 class GpuExecutor:
@@ -114,13 +120,17 @@ class GpuExecutor:
       dtype_str: str,
       block_len: int,
       kvpool_capacity: int,
+      lora_cache_size: int,
+      lora_rank: int,
   ):
     self.dtype = {
         "float16": torch.float16,
         "bfloat16": torch.bfloat16,
     }[dtype_str]
     self.device = torch.device("cuda:0")
-    self.model = LlamaForCausalLM.from_pretrained(
+    self.lora_cache_size = lora_cache_size
+    self.lora_rank = lora_rank
+    self.model = LlamaForCausalLMWithLora.from_pretrained(
         model_path,
         low_cpu_mem_usage=True,
         torch_dtype=self.dtype,
@@ -137,17 +147,33 @@ class GpuExecutor:
         device=self.device,
     )
     self.reqctx: dict[uuid.UUID, RequestContext] = {}
-    self._cnt_step = 0
+    self.lora_models: OrderedDict[uuid.UUID,
+                                  LlamaLoraWeight] = collections.OrderedDict()
+    self._gc_step = 0
 
   def add_request(
       self,
       reqid: uuid.UUID,
+      lora_id: uuid.UUID,
       input_ids: list[int],
       gencfg: GenerationConfig,
   ):
     textgen = GenerationContext(input_ids, gencfg)
     kvcache = KvCache(self.kvpool, len(input_ids))
-    self.reqctx[reqid] = RequestContext(reqid, textgen, kvcache)
+    self.reqctx[reqid] = RequestContext(reqid, lora_id, textgen, kvcache)
+
+    if lora_id in self.lora_models:
+      # Update lora model LRU cache
+      self.lora_models.move_to_end(lora_id)
+      return
+
+    # Load lora model
+    if len(self.lora_models) == self.lora_cache_size:
+      self.lora_models.popitem(last=False)
+    self.lora_models[lora_id] = LlamaLoraWeight(self.model.config,
+                                                self.lora_rank, self.dtype)
+    # TODO: actually load lora model asynchronously
+    # NOTE: currently just uninitialized
 
   def _del_request(self, reqid: uuid.UUID):
     self.reqctx[reqid].kvcache.release()
@@ -157,15 +183,21 @@ class GpuExecutor:
     self._del_request(reqid)
 
   def step(self) -> TextGenerationChunkResponse:
-    self._cnt_step += 1
-    if self._cnt_step % 16 == 0:
+    self._gc_step += 1
+    if self._gc_step % 16 == 0:
       gc.collect()
       torch.cuda.empty_cache()
 
+    # Put prefill requests first, then sort by lora_id.
+    reqs = sorted(
+        self.reqctx.values(), key=lambda x: (not x.is_prefill(), x.lora_id))
+
+    # Gather batch
     prefill_input_ids, prefill_lens, prefill_kv, prefill_reqids = [], [], [], []
     decode_input_ids, decode_kv, decode_reqids = [], [], []
-    for reqctx in self.reqctx.values():
-      if len(reqctx.textgen.output_ids) == reqctx.textgen.prompt_len:
+    lora_ids, lora_lens = [], []
+    for reqctx in reqs:
+      if reqctx.is_prefill():
         prefill_input_ids.extend(reqctx.textgen.output_ids)
         prefill_lens.append(len(reqctx.textgen.output_ids))
         prefill_kv.append(reqctx.kvcache)
@@ -175,7 +207,13 @@ class GpuExecutor:
         decode_kv.append(reqctx.kvcache)
         decode_reqids.append(reqctx.reqid)
         reqctx.kvcache.acquire_one()
+      if lora_ids and lora_ids[-1] == reqctx.lora_id:
+        lora_lens[-1] += 1
+      else:
+        lora_ids.append(reqctx.lora_id)
+        lora_lens.append(1)
 
+    # Run model
     input_ids = torch.tensor(
         prefill_input_ids + decode_input_ids,
         dtype=torch.long,
@@ -183,13 +221,16 @@ class GpuExecutor:
     blen = BatchLenInfo(prefill_lens, len(decode_input_ids), self.device)
     prefill_kv = BatchedKvCache(prefill_kv) if prefill_kv else None
     decode_kv = BatchedKvCache(decode_kv) if decode_kv else None
-    logits, _ = self.model(input_ids, blen, prefill_kv, decode_kv)
+    lora = BatchedLlamaLoraWeight([self.lora_models[id] for id in lora_ids],
+                                  lora_lens)
+    logits, _ = self.model(input_ids, blen, prefill_kv, decode_kv, lora)
     if prefill_kv:
       if decode_kv:
         logits = torch.cat([logits[blen.indptr[1:] - 1], logits[blen.doff:]])
       else:
         logits = logits[blen.indptr[1:] - 1]
 
+    # Postprocess
     request_ids = prefill_reqids + decode_reqids
     indicies, token_ids, finish_reasons = [], [], []
     for i, reqid in enumerate(request_ids):
@@ -208,51 +249,4 @@ class GpuExecutor:
         "token_ids": token_ids,
         "finish_reasons": finish_reasons,
         "num_free_kv_blocks": self.kvpool.num_free_blocks,
-    }
-
-
-class FakeGpuExecutor:
-
-  def __init__(self):
-    self._reqctx: dict[uuid.UUID, dict] = {}
-
-  def add_request(
-      self,
-      reqid: uuid.UUID,
-      input_ids: list[int],
-      gencfg: GenerationConfig,
-  ):
-    rng = np.random.Generator(np.random.PCG64(seed=sum(input_ids)))
-    self._reqctx[reqid] = {
-        "gencfg": gencfg,
-        "rng": rng,
-    }
-
-  def _del_request(self, reqid: uuid.UUID):
-    del self._reqctx[reqid]
-
-  def cancel_request(self, reqid: uuid.UUID):
-    self._del_request(reqid)
-
-  def step(self) -> TextGenerationChunkResponse:
-    request_ids = []
-    token_ids = []
-    finish_reasons = []
-    for reqid, reqctx in self._reqctx.items():
-      request_ids.append(reqid.bytes)
-      if reqctx["rng"].random() < 0.1:
-        next_token_id = reqctx["gencfg"]["stop_token_id"]
-        finish = FinishReason.Stop
-      else:
-        next_token_id = reqctx["rng"].integers(1000, 50000)
-        finish = FinishReason.NotFinished
-      token_ids.append(int(next_token_id))
-      finish_reasons.append(finish.value)
-      if finish != FinishReason.NotFinished:
-        self._del_request(reqid)
-    return {
-        "request_ids": request_ids,
-        "token_ids": token_ids,
-        "finish_reasons": finish_reasons,
-        "num_free_kv_blocks": 1000,
     }

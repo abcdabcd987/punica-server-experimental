@@ -19,8 +19,6 @@ pub struct RunnerArgs {
     pub model_path: PathBuf,
     #[arg(long, help = "wss://example.com/rpc")]
     pub scheduler_url: Url,
-    #[arg(long, help = "Use FakeGpuExecutor")]
-    pub fake_executor: bool,
     #[arg(long, help = "Limit GPU memory usage in GB")]
     pub limit_gpumem_gb: Option<u64>,
 }
@@ -59,7 +57,6 @@ pub async fn runner_main(args: RunnerArgs) -> anyhow::Result<()> {
     let (ch_send, ch_recv) = mpsc::channel(32);
     let runner = Arc::new(Runner::new(
         args.model_path,
-        args.fake_executor,
         args.limit_gpumem_gb,
         devprops,
         gpu_executors,

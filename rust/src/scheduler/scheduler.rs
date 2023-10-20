@@ -80,11 +80,16 @@ impl<R: RunnerStub, Q: RequestStub> Scheduler<R, Q> {
 
             let sizeof = 2;
             let block_len = 16;
+            let max_batch_size = 32;
+            let lora_rank = 16;
+            let lora_cache_size = (max_batch_size as f32 * 1.2) as u64;
             let mut mem = runner
                 .limit_gpumem()
                 .unwrap_or((prop.total_memory as f32 * 0.8) as u64)
                 as i64;
             mem -= (self.model_config.total_params() * sizeof) as i64;
+            mem -= (self.model_config.lora_params(lora_rank) * lora_cache_size)
+                as i64;
             let block_size =
                 self.model_config.token_kvcache_size() * block_len * sizeof;
             let kvpool_capacity = mem / block_size as i64;
@@ -102,7 +107,6 @@ impl<R: RunnerStub, Q: RequestStub> Scheduler<R, Q> {
                 );
                 continue;
             }
-            let max_batch_size = 32;
             self.gpus.insert(
                 prop.uuid,
                 GpuContext {
@@ -121,6 +125,8 @@ impl<R: RunnerStub, Q: RequestStub> Scheduler<R, Q> {
                 dtype: "float16".to_string(),
                 block_len: block_len as u32,
                 kvpool_capacity: kvpool_capacity as u32,
+                lora_cache_size: lora_cache_size as u32,
+                lora_rank,
             });
         }
 
@@ -224,6 +230,7 @@ impl<R: RunnerStub, Q: RequestStub> Scheduler<R, Q> {
                 gpu_uuid,
                 req: comm::TextGenRequest {
                     request_id,
+                    lora_id: reqctx.request.lora_id(),
                     input_ids: reqctx.request.input_ids().to_vec(),
                     gencfg: reqctx.request.generation_config().clone(),
                 },
