@@ -79,6 +79,7 @@ class RequestSpec:
 class TraceSpec:
   duration: float
   rps: float
+  vary_rps: bool
   gap: str
   prompt: str
   output: str
@@ -100,11 +101,18 @@ class TraceSpec:
       output_len = max(int(output_dist.rvs(random_state=req_rng)), 2)
       requests.append((gap, prompt_len, output_len))
       t += gap
+      if self.vary_rps:
+        cos = np.cos(2 * np.pi / self.duration * t)
+        rate = (cos + 1.2) / 2.2 * self.rps
+        gap_dist = parse_gap(self.gap, rate)
+
     lora_lens = get_lora_lens(len(requests), self.popularity)
-    pop_rng.shuffle(lora_lens)
+    lora_indicies = [i for i, l in enumerate(lora_lens) for _ in range(l)]
+    pop_rng.shuffle(lora_indicies)
     requests = [
         RequestSpec(gap, prompt_len, output_len, lora_idx)
-        for (gap, prompt_len, output_len), lora_idx in zip(requests, lora_lens)
+        for (gap, prompt_len,
+             output_len), lora_idx in zip(requests, lora_indicies)
     ]
     return requests
 
@@ -122,12 +130,12 @@ def main():
   parser.add_argument("--warmup", type=int, default=10)
   parser.add_argument("--bench", type=int, default=60)
   parser.add_argument("--rps", type=float, default=1)
+  parser.add_argument("--vary-rps", default=False, action="store_true")
   parser.add_argument("--gap", type=str, default="exp")
   parser.add_argument("--prompt", type=str, default="lognorm:0.8:-1:18")
   parser.add_argument("--output", type=str, default="uniform:1:2048")
   parser.add_argument("--popularity", default="identical")
   parser.add_argument("--seed", type=int, default=0xabcdabcd987)
-  parser.add_argument("--output-bins", type=int, default=100)
   parser.add_argument("--print-trace", action="store_true")
   args = parser.parse_args()
 
@@ -135,6 +143,7 @@ def main():
   trace_spec = TraceSpec(
       duration=total_duration,
       rps=args.rps,
+      vary_rps=args.vary_rps,
       gap=args.gap,
       prompt=args.prompt,
       output=args.output,
@@ -167,7 +176,7 @@ def main():
 
   assert popen.stdout.readline().strip() == "start"
 
-  nbins = args.output_bins
+  nbins = int(args.bench)
   bin_duration = args.bench / nbins
   bins = [dict(tokens=0, gpus=dict()) for _ in range(nbins)]
 
@@ -217,6 +226,7 @@ def main():
           "warmup": args.warmup,
           "bench": args.bench,
           "rps": args.rps,
+          "vary_rps": args.vary_rps,
           "gap": args.gap,
           "prompt": args.prompt,
           "output": args.output,
