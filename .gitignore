@@ -1,6 +1,7 @@
 .vscode/
 target/
 build/
+data/
 __pycache__/
 *.egg-info/
 *.py[cod]

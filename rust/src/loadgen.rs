@@ -57,6 +57,7 @@ struct RequestSpec {
     gap_f32: f32,
     prompt_len: u32,
     output_len: u32,
+    lora_idx: u32,
 }
 
 type TraceSpec = Vec<RequestSpec>;
@@ -74,7 +75,10 @@ fn parse_trace<R: BufRead>(reader: R) -> anyhow::Result<TraceSpec> {
         let output_len =
             parts.next().ok_or_else(|| anyhow!("Missing output_len"))?;
         let output_len = output_len.parse::<u32>().context("output_len")?;
-        ret.push(RequestSpec { gap_f32, prompt_len, output_len });
+        let lora_idx =
+            parts.next().ok_or_else(|| anyhow!("Missing lora_idx"))?;
+        let lora_idx = lora_idx.parse::<u32>().context("lora_idx")?;
+        ret.push(RequestSpec { gap_f32, prompt_len, output_len, lora_idx });
     }
 
     Ok(ret)
@@ -136,13 +140,16 @@ async fn loadgen_request(
     };
     let (tx, mut rx) = mpsc::unbounded_channel();
 
-    let lora_id = Uuid::default();
+    let lora_id = Uuid::from_u64_pair(
+        start_at_nanos as u64 + 0xabcdabcd987,
+        reqspec.lora_idx as u64,
+    );
     scheduler.add_textgen(reqid, lora_id, input_ids, gencfg, tx);
 
     let mut cnt = 0;
-    while let Some(_chunk) = rx.recv().await {
+    while let Some(resp) = rx.recv().await {
         let elapsed = start_at.elapsed().as_secs_f32();
-        println!("{:.9} {}", elapsed, reqidx);
+        println!("{:.9} {} {}", elapsed, reqidx, resp.gpu_uuid);
         cnt += 1;
     }
     if cnt != reqspec.output_len {

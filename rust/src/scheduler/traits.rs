@@ -28,6 +28,11 @@ pub trait RequestStub {
     fn frontend_id(&self) -> Uuid;
 
     // Commands
-    fn add_chunk(&mut self, token_id: u32, finish: comm::FinishReason);
+    fn add_chunk(
+        &mut self,
+        token_id: u32,
+        finish: comm::FinishReason,
+        gpu_uuid: Uuid,
+    );
     fn migrate(&mut self);
 }

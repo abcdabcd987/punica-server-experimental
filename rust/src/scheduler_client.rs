@@ -31,7 +31,7 @@ impl SchedulerClient {
         lora_id: Uuid,
         input_ids: Vec<u32>,
         gencfg: comm::GenerationConfig,
-        chunk_tx: mpsc::UnboundedSender<comm::TextGenChunk>,
+        chunk_tx: mpsc::UnboundedSender<comm::TextChunkToFrontend>,
     ) {
         self.requests.insert(request_id, RequestContext { chunk_tx });
         self.send(&comm::FrontendToSchedulerMessage::TextGenRequest(
@@ -54,7 +54,7 @@ impl SchedulerClient {
 }
 
 struct RequestContext {
-    chunk_tx: mpsc::UnboundedSender<comm::TextGenChunk>,
+    chunk_tx: mpsc::UnboundedSender<comm::TextChunkToFrontend>,
 }
 
 pub struct SchedulerConnection {
@@ -167,17 +167,19 @@ impl SchedulerConnection {
         use comm::SchedulerToFrontendMessage::*;
         match msg {
             TextGenChunk(msg) => {
-                let ctx = match self.requests.get(&msg.request_id) {
+                let reqid = msg.chunk.request_id;
+                let ctx = match self.requests.get(&reqid) {
                     Some(ctx) => ctx,
                     None => {
-                        error!(request_id=%msg.request_id, "Got TextGenChunk for unknown request_id.");
+                        error!(request_id=%reqid, "Got TextGenChunk for unknown request_id.");
                         return;
                     }
                 };
-                ctx.chunk_tx.send(msg.clone()).unwrap();
+                let finish_reason = msg.chunk.finish_reason;
+                ctx.chunk_tx.send(msg).unwrap();
                 drop(ctx);
-                if msg.finish_reason != comm::FinishReason::NotFinished {
-                    self.requests.remove(&msg.request_id);
+                if finish_reason != comm::FinishReason::NotFinished {
+                    self.requests.remove(&reqid);
                 }
             }
         }

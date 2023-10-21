@@ -111,15 +111,15 @@ async fn textgen_handler(
         finished: false,
     };
 
-    while let Some(chunk) = rx.recv().await {
-        let finish_reason = match chunk.finish_reason {
+    while let Some(resp) = rx.recv().await {
+        let finish_reason = match resp.chunk.finish_reason {
             comm::FinishReason::NotFinished => None,
             comm::FinishReason::Stop => Some(api::FinishReason::Stop),
             comm::FinishReason::Length => Some(api::FinishReason::Length),
             comm::FinishReason::Error => Some(api::FinishReason::Error),
         };
 
-        output_ids.push(chunk.token_id);
+        output_ids.push(resp.chunk.token_id);
         let prefix_text =
             ctx.tokenizer.decode(&output_ids[prefix_offset..read_offset]);
         let new_text = ctx.tokenizer.decode(&output_ids[prefix_offset..]);

@@ -105,16 +105,24 @@ impl RequestStub for Request {
         self.frontend_id
     }
 
-    fn add_chunk(&mut self, token_id: u32, finish: comm::FinishReason) {
+    fn add_chunk(
+        &mut self,
+        token_id: u32,
+        finish: comm::FinishReason,
+        gpu_uuid: Uuid,
+    ) {
         let index = self.tokens.len() as u32;
         self.tokens.push(token_id);
 
         let msg = comm::SchedulerToFrontendMessage::TextGenChunk(
-            comm::TextGenChunk {
-                request_id: self.id,
-                index,
-                token_id,
-                finish_reason: finish,
+            comm::TextChunkToFrontend {
+                chunk: comm::TextGenChunk {
+                    request_id: self.id,
+                    index,
+                    token_id,
+                    finish_reason: finish,
+                },
+                gpu_uuid,
             },
         );
         let m = postcard::to_allocvec(&msg).unwrap();

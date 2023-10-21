@@ -171,7 +171,11 @@ impl<R: RunnerStub, Q: RequestStub> Scheduler<R, Q> {
                     {
                         fctx.request_ids.remove(&request_id);
                     }
-                    reqctx.request.add_chunk(0, comm::FinishReason::Error);
+                    reqctx.request.add_chunk(
+                        0,
+                        comm::FinishReason::Error,
+                        prop.uuid,
+                    );
                 }
             }
             info!(runner_id=%runner_id, gpu_uuid=%gpu.gpu_uuid, gpu_name=%gpu.devprop.name, "GPU removed.");
@@ -384,7 +388,11 @@ impl<R: RunnerStub, Q: RequestStub> Scheduler<R, Q> {
             if reqctx.len != reqctx.request.input_ids().len() as u32 {
                 gpu_state.kvpool.append_token(&chunk.request_id);
             }
-            reqctx.request.add_chunk(chunk.token_id, chunk.finish_reason);
+            reqctx.request.add_chunk(
+                chunk.token_id,
+                chunk.finish_reason,
+                gpu_uuid,
+            );
             reqctx.len += 1;
 
             if chunk.finish_reason != comm::FinishReason::NotFinished {
@@ -448,7 +456,7 @@ impl<R: RunnerStub, Q: RequestStub> Scheduler<R, Q> {
         gpu_state.kvpool.release(msg.request_id);
 
         if send_result {
-            reqctx.request.add_chunk(0, comm::FinishReason::Stop);
+            reqctx.request.add_chunk(0, comm::FinishReason::Stop, gpu_uuid);
         }
     }
 

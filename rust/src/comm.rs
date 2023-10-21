@@ -139,10 +139,16 @@ pub enum FrontendToSchedulerMessage {
 
 #[derive(Serialize, Deserialize, Debug)]
 pub enum SchedulerToFrontendMessage {
-    TextGenChunk(TextGenChunk),
+    TextGenChunk(TextChunkToFrontend),
 }
 
 #[derive(Serialize, Deserialize, Debug)]
 pub struct CancelTextGen {
     pub request_id: Uuid,
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+pub struct TextChunkToFrontend {
+    pub chunk: TextGenChunk,
+    pub gpu_uuid: Uuid,
 }
